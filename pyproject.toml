@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 license = { file = "LICENSE" }
 authors = [{ name = "EMIP Contributors" }]
-dependencies = ["psycopg2-binary>=2.9.9", "PyYAML>=6.0"]
+dependencies = ["psycopg2-binary>=2.9.9", "PyYAML>=6.0", "sqlglot>=26.0.0"]
 
 [project.optional-dependencies]
 dev = [
