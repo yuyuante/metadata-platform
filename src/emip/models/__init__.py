@@ -4,11 +4,8 @@ from .domain import (
     Column,
     ColumnRelation,
     DetectionMethod,
-    MetadataObject,
-    Object,
     ObjectProperty,
     ObjectTag,
-    ObjectType,
     ObjectVersion,
     PIIResult,
     PIIRule,
@@ -20,6 +17,7 @@ from .domain import (
     ScanTarget,
     Tag,
 )
+from .metadata_object import MetadataObject, Object, ObjectStatus, ObjectType
 
 __all__ = [
     "Column",
@@ -28,6 +26,7 @@ __all__ = [
     "MetadataObject",
     "Object",
     "ObjectProperty",
+    "ObjectStatus",
     "ObjectTag",
     "ObjectType",
     "ObjectVersion",
