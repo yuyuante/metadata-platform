@@ -3,7 +3,10 @@ from typing import cast
 
 from emip.cli import run_scan
 from emip.domain import MetadataObject
-from emip.repository.metadata_persister import MetadataObjectPersister
+from emip.repository.metadata_persister import (
+    MetadataObjectPersister,
+    PersistenceResult,
+)
 from emip.scanner.folder_metadata_scanner import FolderMetadataScanner
 from emip.scanner.folder_scanner import FolderScanner
 
@@ -12,9 +15,9 @@ class InMemoryPersister:
     def __init__(self) -> None:
         self.objects: list[MetadataObject] = []
 
-    def persist(self, objects: list[MetadataObject]) -> int:
+    def persist(self, objects: list[MetadataObject]) -> PersistenceResult:
         self.objects.extend(objects)
-        return len(objects)
+        return PersistenceResult(len(objects), 0, 0)
 
 
 def test_run_scan_persists_objects_and_prints_summary(
@@ -30,6 +33,7 @@ def test_run_scan_persists_objects_and_prints_summary(
         scanner=FolderScanner(),
         metadata_scanner=FolderMetadataScanner(),
         persister=cast(MetadataObjectPersister, persister),
+        report_dir=tmp_path / "scan-report",
     )
 
     assert exit_code == 0

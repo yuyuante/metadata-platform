@@ -1,11 +1,14 @@
 """Command-line entry point for EMIP."""
 
 import argparse
+import time
 from pathlib import Path
 
+from emip import __version__
 from emip.repository.metadata_persister import MetadataObjectPersister
 from emip.scanner.folder_metadata_scanner import FolderMetadataScanner
 from emip.scanner.folder_scanner import FolderScanner
+from emip.scanner.scan_report import ScanReportWriter, ScanSummary
 
 
 def run_scan(
@@ -13,6 +16,7 @@ def run_scan(
     scanner: FolderScanner | None = None,
     metadata_scanner: FolderMetadataScanner | None = None,
     persister: MetadataObjectPersister | None = None,
+    report_dir: Path | None = None,
 ) -> int:
     """Scan ``folder``, persist parsed objects, and return a process exit code."""
 
@@ -21,6 +25,7 @@ def run_scan(
         print(folder)
         return 1
 
+    started_at = time.perf_counter()
     file_scanner = scanner if scanner is not None else FolderScanner()
     parser_scanner = (
         metadata_scanner if metadata_scanner is not None else FolderMetadataScanner()
@@ -29,28 +34,50 @@ def run_scan(
     paths = file_scanner.scan(folder)
 
     print("========================================")
-    print("EMIP v0.1")
+    print(f"EMIP v{__version__}")
     print("========================================")
     print("Scanning...")
     print(f"Found {len(paths)} files")
     print("Parsing...")
 
     objects = []
-    files_failed = 0
+    failures = []
+    files_supported = 0
     for path in paths:
-        try:
-            objects.extend(parser_scanner.scan_file(path))
-        except Exception:
+        result = parser_scanner.scan_file_with_report(path, folder)
+        if result.supported:
+            files_supported += 1
+        if result.failure is not None:
             print(f"Parse failed: {path}")
-            files_failed += 1
+            failures.append(result.failure)
+            continue
+        objects.extend(result.objects)
 
     print("Saving...")
-    objects_created = object_persister.persist(objects)
+    persistence_result = object_persister.persist(objects)
+    elapsed_seconds = time.perf_counter() - started_at
+    summary = ScanSummary(
+        files_scanned=len(paths),
+        files_supported=files_supported,
+        files_failed=len(failures),
+        objects_created=persistence_result.objects_created,
+        elapsed_seconds=elapsed_seconds,
+    )
+    report_path = ScanReportWriter().write(
+        summary,
+        failures,
+        output_dir=report_dir if report_dir is not None else Path("scan-report"),
+    )
+
     print("Done.")
     print()
     print(f"Files scanned    : {len(paths)}")
-    print(f"Files failed     : {files_failed}")
-    print(f"Objects created  : {objects_created}")
+    print(f"Files supported  : {files_supported}")
+    print(f"Files failed     : {len(failures)}")
+    print(f"Objects created  : {persistence_result.objects_created}")
+    print(f"Objects skipped  : {persistence_result.objects_skipped}")
+    print(f"Objects failed   : {persistence_result.objects_failed}")
+    print(f"Report written to: {report_path}")
     print()
     print("Success.")
     return 0

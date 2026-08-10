@@ -2,44 +2,70 @@
 
 EMIP uses a staged architecture. Each stage owns one responsibility and communicates through stable contracts.
 
+## Implemented v0.1 flow
+
 ```text
-Scanner
-    |
-    v
-Parser
-    |
-    v
+Folder
+    ↓
+FolderScanner
+    ↓
+FolderMetadataScanner
+    ↓
+ParserDispatcher
+    ↓
+SqlDdlParser
+    ↓
+MetadataPersister
+    ↓
+MetadataRepository
+    ↓
+Greenplum
+```
+
+### FolderScanner
+
+Discovers files recursively with `pathlib.Path`. It returns absolute, deterministically sorted file paths and does not inspect file contents or access the database.
+
+### FolderMetadataScanner
+
+Coordinates file-level parser dispatch and collects `MetadataObject` instances. Unsupported file types are skipped. It does not persist data.
+
+### ParserDispatcher
+
+Selects the implemented parser by file extension. SQL files are assigned to `SqlDdlParser`; unsupported extensions return no parser.
+
+### SqlDdlParser
+
+Uses SQLGlot AST parsing to convert supported SQL DDL statements into canonical `MetadataObject` instances. It does not write to Greenplum.
+
+### MetadataPersister
+
+Accepts parsed `MetadataObject` instances and calls the repository persistence API once for each object. It does not parse files or implement database-specific SQL.
+
+### MetadataRepository
+
+Owns Greenplum persistence for metadata objects. It uses parameterized SQL and converts database rows to domain objects.
+
+## Future stages
+
+The platform is designed to evolve toward:
+
+```text
 Metadata Repository
-    |
-    v
+    ↓
 Lineage Engine
-    |
-    v
+    ↓
 REST API
-    |
-    v
+    ↓
 MCP Server
-    |
-    v
+    ↓
 ChatGPT / Codex
 ```
 
-## Responsibilities
-
-- **Scanner** discovers source files, database objects, workflows, and other metadata inputs. It should support incremental discovery without embedding parsing rules.
-- **Parser** converts a supported input format into the canonical metadata model. It emits normalized objects, versions, properties, columns, and relations through domain contracts.
-- **Metadata Repository** persists the canonical model behind abstract repository interfaces. Storage technology is an adapter concern.
-- **Lineage Engine** derives upstream and downstream relationships and exposes lineage and impact-analysis capabilities.
-- **REST API** provides a stable HTTP interface for applications and operational integrations.
-- **MCP Server** exposes curated metadata capabilities to MCP-compatible clients.
-- **ChatGPT / Codex** consume AI-ready metadata services for natural-language exploration and assisted analysis.
+These stages are not implemented in v0.1.
 
 ## Canonical model boundary
 
-Parsers produce the canonical metadata model rather than writing directly to a database. This keeps format-specific extraction separate from persistence, allows multiple repositories to consume the same parser output, and makes parser plugins testable without database infrastructure. It also ensures that lineage, API, and future AI services operate on one consistent domain vocabulary.
-
-No parser, lineage engine, database adapter, API, or AI integration is implemented in Sprint 1.
-
-## Architecture Decision Record
+Parsers produce the canonical metadata model rather than writing directly to a database. This keeps format-specific extraction separate from persistence, allows multiple repositories to consume the same parser output, and makes parser plugins testable without database infrastructure.
 
 The accepted architectural constraints are documented in [ADR-0001](adr/0001-emip-architecture.md).

@@ -191,12 +191,23 @@ class MetadataRepository:
         return _row_to_metadata_object(row)
 
     def exists_object(self, metadata_object: MetadataObject) -> bool:
-        """Return whether a MetadataObject exists by object_id."""
+        """Return whether a MetadataObject already exists."""
 
-        query = sql.SQL("SELECT 1 FROM {} WHERE {} = %s").format(
+        query = sql.SQL(
+            "SELECT 1 FROM {} WHERE {} = %s OR ({} = %s AND {} = %s)"
+        ).format(
             self._table_identifier,
             sql.Identifier("object_id"),
+            sql.Identifier("system_name"),
+            sql.Identifier("qualified_name"),
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query, (str(metadata_object.object_id),))
+            cursor.execute(
+                query,
+                (
+                    str(metadata_object.object_id),
+                    metadata_object.system_name,
+                    metadata_object.qualified_name,
+                ),
+            )
             return cursor.fetchone() is not None
