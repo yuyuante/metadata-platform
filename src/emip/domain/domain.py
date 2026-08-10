@@ -5,37 +5,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
+from .metadata_object import ObjectType
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-class ObjectType(StrEnum):
-    """Built-in metadata object categories."""
-
-    TABLE = "TABLE"
-    VIEW = "VIEW"
-    MATERIALIZED_VIEW = "MATERIALIZED_VIEW"
-    FUNCTION = "FUNCTION"
-    PROCEDURE = "PROCEDURE"
-    TRIGGER = "TRIGGER"
-    INDEX = "INDEX"
-    SEQUENCE = "SEQUENCE"
-    WORKFLOW = "WORKFLOW"
-    SESSION = "SESSION"
-    MAPPING = "MAPPING"
-    SOURCE = "SOURCE"
-    TARGET = "TARGET"
-    FILE = "FILE"
-    DIRECTORY = "DIRECTORY"
-    FTP = "FTP"
-    API = "API"
-    JAVA = "JAVA"
-    PYTHON = "PYTHON"
-    SHELL = "SHELL"
-    CPP = "CPP"
-    CSHARP = "CSHARP"
-    PERL = "PERL"
 
 
 class RelationType(StrEnum):
@@ -75,26 +49,6 @@ class DetectionMethod(StrEnum):
 
 type ObjectTypeValue = ObjectType | str
 type RelationTypeValue = RelationType | str
-
-
-@dataclass(slots=True)
-class MetadataObject:
-    """A canonical representation of any discoverable metadata object."""
-
-    object_id: UUID = field(default_factory=uuid4)
-    object_type: ObjectTypeValue = ObjectType.SOURCE
-    name: str = ""
-    qualified_name: str = ""
-    description: str | None = None
-    owner: str | None = None
-    system: str | None = None
-    schema_name: str | None = None
-    status: str | None = None
-    created_at: datetime = field(default_factory=_utc_now)
-    updated_at: datetime = field(default_factory=_utc_now)
-
-
-Object = MetadataObject
 
 
 @dataclass(slots=True)

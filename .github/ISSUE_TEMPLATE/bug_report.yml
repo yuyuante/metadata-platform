@@ -1,0 +1,19 @@
+name: Bug report
+description: Report a reproducible problem in EMIP
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the problem and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: List the smallest steps to reproduce the issue.
+    validations:
+      required: true
