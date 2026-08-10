@@ -6,8 +6,10 @@ from pathlib import Path
 class FolderScanner:
     """Discover files recursively without inspecting their contents."""
 
-    @staticmethod
-    def scan(path: Path) -> list[Path]:
-        """Return all files below ``path`` in deterministic order."""
+    def scan(self, root: Path) -> list[Path]:
+        """Return every file below ``root`` as sorted absolute paths."""
 
-        return sorted(candidate for candidate in path.rglob("*") if candidate.is_file())
+        absolute_root = root.resolve()
+        return sorted(
+            candidate for candidate in absolute_root.rglob("*") if candidate.is_file()
+        )

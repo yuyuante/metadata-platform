@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG_PATH = Path("config/database.yaml")
-DEFAULT_ENV_CONFIG_PATH = Path(r"C:\Users\peteryu\code\env\GPprod_admin.txt")
+DEFAULT_ENV_CONFIG_PATH = Path(r"C:\Users\peteryu\code\env\GP178_admin.txt")
 _ENV_PATTERN = re.compile(
     r"^\s*\$env:(PGHOST|PGPORT|PGDATABASE|PGUSER|PGPASSWORD)\s*=\s*['\"]?(.*?)['\"]?\s*$"
 )
