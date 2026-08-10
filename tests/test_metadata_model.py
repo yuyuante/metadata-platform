@@ -1,7 +1,7 @@
 from dataclasses import is_dataclass
 from uuid import UUID
 
-from emip.models import MetadataObject, ObjectType, RelationType, ScanStatus
+from emip.domain import MetadataObject, ObjectType, RelationType, ScanStatus
 
 
 def _metadata_object(name: str) -> MetadataObject:

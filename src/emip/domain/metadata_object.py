@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import Self
 from uuid import UUID, uuid4
 
 
@@ -43,22 +44,52 @@ class MetadataObject:
     system_name: str = ""
     qualified_name: str = ""
     name: str = ""
-    display_name: str = ""
+    display_name: str | None = None
     description: str | None = None
     owner_name: str | None = None
-    status: ObjectStatus = ObjectStatus.UNKNOWN
+    status: ObjectStatus = ObjectStatus.ACTIVE
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
 
     def __post_init__(self) -> None:
-        """Validate the required metadata object names."""
+        """Set the display name and validate required names."""
 
+        if self.display_name is None:
+            self.display_name = self.name
         if not self.system_name:
             raise ValueError("system_name must not be empty")
         if not self.qualified_name:
             raise ValueError("qualified_name must not be empty")
         if not self.name:
             raise ValueError("name must not be empty")
+
+    @classmethod
+    def create(
+        cls,
+        object_type: ObjectType,
+        system_name: str,
+        qualified_name: str,
+        name: str,
+        display_name: str | None = None,
+        description: str | None = None,
+        owner_name: str | None = None,
+        status: ObjectStatus = ObjectStatus.ACTIVE,
+    ) -> Self:
+        """Create a metadata object with generated identity and timestamps."""
+
+        return cls(
+            object_id=uuid4(),
+            object_type=object_type,
+            system_name=system_name,
+            qualified_name=qualified_name,
+            name=name,
+            display_name=display_name,
+            description=description,
+            owner_name=owner_name,
+            status=status,
+            created_at=_utc_now(),
+            updated_at=_utc_now(),
+        )
 
 
 Object = MetadataObject

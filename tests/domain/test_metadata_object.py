@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from emip.models.metadata_object import MetadataObject, ObjectStatus, ObjectType
+from emip.domain.metadata_object import MetadataObject, ObjectStatus, ObjectType
 
 
 def _build_object(**overrides: object) -> MetadataObject:
@@ -13,7 +13,6 @@ def _build_object(**overrides: object) -> MetadataObject:
         "system_name": "warehouse",
         "qualified_name": "sales.customer",
         "name": "customer",
-        "display_name": "Customer",
         "status": ObjectStatus.ACTIVE,
     }
     values.update(overrides)
@@ -35,7 +34,7 @@ def test_timestamps_are_generated_automatically() -> None:
     assert metadata_object.updated_at.tzinfo is UTC
 
 
-def test_enum_values_are_strings() -> None:
+def test_enum_values_are_exact() -> None:
     assert [member.value for member in ObjectType] == [
         "TABLE",
         "VIEW",
@@ -56,13 +55,33 @@ def test_enum_values_are_strings() -> None:
     ]
 
 
-def test_metadata_object_is_a_dataclass_with_expected_values() -> None:
+def test_metadata_object_is_a_dataclass() -> None:
     metadata_object = _build_object(description="Customer master data")
 
     assert is_dataclass(metadata_object)
     assert metadata_object.object_type is ObjectType.TABLE
     assert metadata_object.status is ObjectStatus.ACTIVE
-    assert metadata_object.description == "Customer master data"
+
+
+def test_display_name_defaults_to_name() -> None:
+    metadata_object = _build_object()
+
+    assert metadata_object.display_name == "customer"
+
+
+def test_create_generates_identity_timestamps_and_defaults() -> None:
+    metadata_object = MetadataObject.create(
+        object_type=ObjectType.VIEW,
+        system_name="warehouse",
+        qualified_name="sales.customer_view",
+        name="customer_view",
+    )
+
+    assert isinstance(metadata_object.object_id, UUID)
+    assert metadata_object.display_name == "customer_view"
+    assert metadata_object.status is ObjectStatus.ACTIVE
+    assert metadata_object.created_at.tzinfo is UTC
+    assert metadata_object.updated_at.tzinfo is UTC
 
 
 @pytest.mark.parametrize("field_name", ["system_name", "qualified_name", "name"])

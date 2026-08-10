@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from uuid import UUID
 
-from emip.models import (
+from emip.domain import (
     Column,
     ColumnRelation,
     MetadataObject,
