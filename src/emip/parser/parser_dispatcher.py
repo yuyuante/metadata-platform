@@ -12,9 +12,14 @@ class UnsupportedFileTypeError(ValueError):
 class ParserDispatcher:
     """Select the implemented parser for a file."""
 
-    def dispatch(self, path: Path) -> SqlDdlParser | None:
+    def get_parser(self, path: Path) -> SqlDdlParser | None:
         """Return the SQL DDL parser or ``None`` for unsupported files."""
 
         if path.suffix.lower() == ".sql":
             return SqlDdlParser()
         return None
+
+    def dispatch(self, path: Path) -> SqlDdlParser | None:
+        """Return the parser using the legacy dispatcher method name."""
+
+        return self.get_parser(path)
