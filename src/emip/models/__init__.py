@@ -1,1 +1,43 @@
-"""EMIP package placeholder."""
+"""Canonical metadata domain objects and enumerations."""
+
+from .domain import (
+    Column,
+    ColumnRelation,
+    DetectionMethod,
+    MetadataObject,
+    Object,
+    ObjectProperty,
+    ObjectTag,
+    ObjectType,
+    ObjectVersion,
+    PIIResult,
+    PIIRule,
+    Relation,
+    RelationType,
+    ScanJob,
+    ScanResult,
+    ScanStatus,
+    ScanTarget,
+    Tag,
+)
+
+__all__ = [
+    "Column",
+    "ColumnRelation",
+    "DetectionMethod",
+    "MetadataObject",
+    "Object",
+    "ObjectProperty",
+    "ObjectTag",
+    "ObjectType",
+    "ObjectVersion",
+    "PIIResult",
+    "PIIRule",
+    "Relation",
+    "RelationType",
+    "ScanJob",
+    "ScanResult",
+    "ScanStatus",
+    "ScanTarget",
+    "Tag",
+]
