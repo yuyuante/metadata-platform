@@ -11,5 +11,7 @@ class FolderScanner:
 
         absolute_root = root.resolve()
         return sorted(
-            candidate for candidate in absolute_root.rglob("*") if candidate.is_file()
+            candidate.resolve()
+            for candidate in absolute_root.rglob("*")
+            if candidate.is_file()
         )

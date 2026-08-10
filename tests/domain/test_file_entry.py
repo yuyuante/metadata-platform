@@ -15,13 +15,13 @@ def _entry(path: Path, size: int = 10) -> FileEntry:
 
 
 def test_extension_is_derived_and_lowercase() -> None:
-    entry = _entry(Path("C:/data/Report.SQL"))
+    entry = _entry(Path.cwd() / "data" / "Report.SQL")
 
     assert entry.extension == ".sql"
 
 
 def test_extension_is_empty_when_path_has_no_suffix() -> None:
-    entry = _entry(Path("C:/data/README"))
+    entry = _entry(Path.cwd() / "data" / "README")
 
     assert entry.extension == ""
 
@@ -33,4 +33,4 @@ def test_relative_path_is_rejected() -> None:
 
 def test_negative_size_is_rejected() -> None:
     with pytest.raises(ValueError, match="non-negative"):
-        _entry(Path("C:/data/report.sql"), size=-1)
+        _entry(Path.cwd() / "data" / "report.sql", size=-1)
