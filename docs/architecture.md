@@ -4,17 +4,23 @@ EMIP uses a staged architecture. Each stage owns one responsibility and communic
 
 ```text
 Scanner
-    ↓
+    |
+    v
 Parser
-    ↓
+    |
+    v
 Metadata Repository
-    ↓
+    |
+    v
 Lineage Engine
-    ↓
+    |
+    v
 REST API
-    ↓
+    |
+    v
 MCP Server
-    ↓
+    |
+    v
 ChatGPT / Codex
 ```
 
@@ -33,3 +39,7 @@ ChatGPT / Codex
 Parsers produce the canonical metadata model rather than writing directly to a database. This keeps format-specific extraction separate from persistence, allows multiple repositories to consume the same parser output, and makes parser plugins testable without database infrastructure. It also ensures that lineage, API, and future AI services operate on one consistent domain vocabulary.
 
 No parser, lineage engine, database adapter, API, or AI integration is implemented in Sprint 1.
+
+## Architecture Decision Record
+
+The accepted architectural constraints are documented in [ADR-0001](adr/0001-emip-architecture.md).
