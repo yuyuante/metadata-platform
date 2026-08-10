@@ -4,28 +4,42 @@ EMIP uses a staged architecture. Each stage owns one responsibility and communic
 
 ```text
 Scanner
-    ↓
+    |
+    v
 Parser
-    ↓
+    |
+    v
 Metadata Repository
-    ↓
+    |
+    v
 Lineage Engine
-    ↓
+    |
+    v
 REST API
-    ↓
+    |
+    v
 MCP Server
-    ↓
+    |
+    v
 ChatGPT / Codex
 ```
 
 ## Responsibilities
 
 - **Scanner** discovers source files, database objects, workflows, and other metadata inputs. It should support incremental discovery without embedding parsing rules.
-- **Parser** converts a supported input format into normalized metadata events. Future parser plugins own format-specific behavior and do not modify the core framework.
-- **Metadata Repository** persists metadata objects and relations behind an abstract repository contract. Storage technology is an adapter concern.
+- **Parser** converts a supported input format into the canonical metadata model. It emits normalized objects, versions, properties, columns, and relations through domain contracts.
+- **Metadata Repository** persists the canonical model behind abstract repository interfaces. Storage technology is an adapter concern.
 - **Lineage Engine** derives upstream and downstream relationships and exposes lineage and impact-analysis capabilities.
 - **REST API** provides a stable HTTP interface for applications and operational integrations.
 - **MCP Server** exposes curated metadata capabilities to MCP-compatible clients.
 - **ChatGPT / Codex** consume AI-ready metadata services for natural-language exploration and assisted analysis.
 
-No parser, lineage engine, database adapter, API, or AI integration is implemented in Sprint 0.
+## Canonical model boundary
+
+Parsers produce the canonical metadata model rather than writing directly to a database. This keeps format-specific extraction separate from persistence, allows multiple repositories to consume the same parser output, and makes parser plugins testable without database infrastructure. It also ensures that lineage, API, and future AI services operate on one consistent domain vocabulary.
+
+No parser, lineage engine, database adapter, API, or AI integration is implemented in Sprint 1.
+
+## Architecture Decision Record
+
+The accepted architectural constraints are documented in [ADR-0001](adr/0001-emip-architecture.md).
