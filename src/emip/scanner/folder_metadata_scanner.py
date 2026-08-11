@@ -9,7 +9,7 @@ from emip.parser.parser_dispatcher import ParserDispatcher
 from emip.parser.script_splitter import ScriptSplitter
 from emip.parser.sql_ddl_parser import SqlDdlParser
 from emip.parser.statement_filter import StatementFilter
-from emip.scanner.file_reader import FileReader
+from emip.scanner.file_reader import FileReader, UnsupportedInputError
 from emip.scanner.folder_scanner import FolderScanner
 from emip.scanner.scan_report import FailedFile
 
@@ -21,6 +21,7 @@ class FileScanResult:
     objects: list[MetadataObject]
     supported: bool
     failure: FailedFile | None = None
+    unsupported_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +62,10 @@ class FolderMetadataScanner:
         parser = self._dispatcher.get_parser(path)
         if parser is None:
             return []
-        return self._parse_file(path, parser)
+        try:
+            return self._parse_file(path, parser)
+        except UnsupportedInputError:
+            return []
 
     def scan_file_with_report(self, path: Path, root: Path) -> FileScanResult:
         """Process one file and return parser and failure details."""
@@ -88,6 +92,12 @@ class FolderMetadataScanner:
         parser_name = type(parser).__name__
         try:
             objects = self._parse_file(path, parser)
+        except UnsupportedInputError as exc:
+            return FileScanResult(
+                objects=[],
+                supported=False,
+                unsupported_reason=exc.reason,
+            )
         except Exception as exc:
             return FileScanResult(
                 objects=[],

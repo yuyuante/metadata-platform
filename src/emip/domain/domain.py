@@ -25,6 +25,7 @@ class RelationType(StrEnum):
     DEPENDS_ON = "DEPENDS_ON"
     BELONGS_TO = "BELONGS_TO"
     GENERATES = "GENERATES"
+    TARGET = "TARGET"
 
 
 class ScanStatus(StrEnum):
@@ -85,6 +86,8 @@ class Column:
     datatype: str | None = None
     nullable: bool = True
     default_value: str | None = None
+    is_primary_key: bool = False
+    is_unique: bool = False
 
 
 @dataclass(slots=True)
@@ -95,7 +98,19 @@ class Relation:
     source_object_id: UUID = field(default_factory=uuid4)
     target_object_id: UUID = field(default_factory=uuid4)
     relation_type: RelationTypeValue = RelationType.DEPENDS_ON
+    source_type: str = "STATIC_SQL"
     created_at: datetime = field(default_factory=_utc_now)
+
+
+@dataclass(frozen=True, slots=True)
+class RelationCandidate:
+    """Parser relation awaiting endpoint UUID resolution."""
+
+    source_qualified_name: str
+    target_qualified_name: str
+    relation_type: RelationTypeValue
+    source_type: str
+    evidence_sql: str
 
 
 @dataclass(slots=True)

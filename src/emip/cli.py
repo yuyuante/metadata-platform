@@ -43,14 +43,26 @@ def run_scan(
     objects = []
     failures = []
     files_supported = 0
+    files_unsupported = 0
+    unsupported_reasons: list[str] = []
+    multiple_object_files: list[tuple[Path, int]] = []
     for path in paths:
         result = parser_scanner.scan_file_with_report(path, folder)
+        if result.unsupported_reason is not None:
+            files_unsupported += 1
+            unsupported_reasons.append(result.unsupported_reason)
+            print(f"Unsupported input: {path}")
+            print(f"Reason: {result.unsupported_reason}")
+            continue
         if result.supported:
             files_supported += 1
         if result.failure is not None:
             print(f"Parse failed: {path}")
             failures.append(result.failure)
             continue
+        object_count = len(result.objects)
+        if object_count > 1:
+            multiple_object_files.append((path, object_count))
         objects.extend(result.objects)
 
     print("Saving...")
@@ -73,10 +85,19 @@ def run_scan(
     print()
     print(f"Files scanned    : {len(paths)}")
     print(f"Files supported  : {files_supported}")
+    print(f"Files unsupported: {files_unsupported}")
+    if unsupported_reasons:
+        print("Unsupported reason: " + ", ".join(sorted(set(unsupported_reasons))))
     print(f"Files failed     : {len(failures)}")
     print(f"Objects created  : {persistence_result.objects_created}")
     print(f"Objects skipped  : {persistence_result.objects_skipped}")
     print(f"Objects failed   : {persistence_result.objects_failed}")
+    print("Files with multiple objects:")
+    if multiple_object_files:
+        for path, object_count in multiple_object_files:
+            print(f"  {path} : {object_count} objects")
+    else:
+        print("  None")
     print(f"Report written to: {report_path}")
     print()
     print("Success.")

@@ -1,10 +1,15 @@
 """Canonical metadata object domain model."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Self
+from typing import TYPE_CHECKING, Self
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from .domain import Column, ObjectProperty, RelationCandidate
 
 
 class ObjectType(StrEnum):
@@ -12,6 +17,7 @@ class ObjectType(StrEnum):
 
     TABLE = "TABLE"
     VIEW = "VIEW"
+    MATERIALIZED_VIEW = "MATERIALIZED_VIEW"
     FUNCTION = "FUNCTION"
     PROCEDURE = "PROCEDURE"
     TRIGGER = "TRIGGER"
@@ -50,6 +56,9 @@ class MetadataObject:
     status: ObjectStatus = ObjectStatus.ACTIVE
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
+    columns: tuple[Column, ...] = ()
+    properties: tuple[ObjectProperty, ...] = ()
+    relation_candidates: tuple[RelationCandidate, ...] = ()
 
     def __post_init__(self) -> None:
         """Set the display name and validate required names."""
@@ -74,6 +83,9 @@ class MetadataObject:
         description: str | None = None,
         owner_name: str | None = None,
         status: ObjectStatus = ObjectStatus.ACTIVE,
+        columns: tuple[Column, ...] = (),
+        properties: tuple[ObjectProperty, ...] = (),
+        relation_candidates: tuple[RelationCandidate, ...] = (),
     ) -> Self:
         """Create a metadata object with generated identity and timestamps."""
 
@@ -89,6 +101,9 @@ class MetadataObject:
             status=status,
             created_at=_utc_now(),
             updated_at=_utc_now(),
+            columns=columns,
+            properties=properties,
+            relation_candidates=relation_candidates,
         )
 
 

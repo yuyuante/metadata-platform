@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from emip.domain import ObjectType
-from emip.parser.sql_ddl_parser import SqlDdlParser
+from emip.parser.sql_ddl_parser import SqlDdlParser, UnsupportedSqlSyntaxError
 
 
 def _parse(tmp_path: Path, sql: str):
@@ -20,11 +22,96 @@ def test_parse_create_table(tmp_path: Path) -> None:
     assert objects[0].name == "customer"
 
 
+def test_parse_malformed_greenplum_table_raises(tmp_path: Path) -> None:
+    sql = "CREATE TABLE sales.customer (id INT) NOT NULL) DISTRIBUTED BY (id);"
+
+    with pytest.raises(UnsupportedSqlSyntaxError):
+        _parse(tmp_path, sql)
+
+
+def test_parse_greenplum_distributed_table(tmp_path: Path) -> None:
+    sql = """
+    CREATE TABLE sales.customer (id INT)
+    DISTRIBUTED BY (id);
+    """
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TABLE
+    assert objects[0].qualified_name == "sales.customer"
+
+
+def test_parse_greenplum_randomly_distributed_table(tmp_path: Path) -> None:
+    sql = "CREATE TABLE sales.customer (id INT) DISTRIBUTED RANDOMLY;"
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TABLE
+
+
+def test_parse_greenplum_replicated_table(tmp_path: Path) -> None:
+    sql = "CREATE TABLE sales.customer (id INT) DISTRIBUTED REPLICATED;"
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TABLE
+
+
+def test_parse_greenplum_distribute_typo_used_in_source_table(tmp_path: Path) -> None:
+    sql = "CREATE TABLE sales.customer (id INT) DISTRIBUTE BY (id);"
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TABLE
+
+
+def test_parse_create_materialized_view(tmp_path: Path) -> None:
+    sql = "CREATE MATERIALIZED VIEW reporting.daily_customers AS SELECT 1;"
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.MATERIALIZED_VIEW
+    assert objects[0].qualified_name == "reporting.daily_customers"
+    assert objects[0].name == "daily_customers"
+    assert objects[0].description == sql
+
+
+def test_parse_create_materialized_view_as_select(tmp_path: Path) -> None:
+    sql = """
+    CREATE MATERIALIZED VIEW DB_OWNER.mv_customer AS
+    SELECT customer_id, customer_name
+    FROM DB_OWNER.customer;
+    """
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.MATERIALIZED_VIEW
+    assert objects[0].qualified_name == "DB_OWNER.mv_customer"
+    assert "FROM DB_OWNER.customer" in (objects[0].description or "")
+
+
 def test_parse_create_view(tmp_path: Path) -> None:
-    objects = _parse(tmp_path, "CREATE VIEW reporting.customers AS SELECT 1;")
+    sql = "CREATE VIEW reporting.customers AS SELECT 1;"
+    objects = _parse(tmp_path, sql)
 
     assert objects[0].object_type is ObjectType.VIEW
     assert objects[0].qualified_name == "reporting.customers"
+    assert objects[0].name == "customers"
+    assert objects[0].description == sql
+
+
+def test_parse_create_or_replace_view(tmp_path: Path) -> None:
+    sql = "CREATE OR REPLACE VIEW reporting.customers AS SELECT 1;"
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.VIEW
+    assert objects[0].qualified_name == "reporting.customers"
+    assert objects[0].description == sql
 
 
 def test_parse_create_function(tmp_path: Path) -> None:
@@ -32,13 +119,97 @@ def test_parse_create_function(tmp_path: Path) -> None:
 
     assert objects[0].object_type is ObjectType.FUNCTION
     assert objects[0].name == "refresh_data"
+    assert objects[0].description == (
+        "CREATE FUNCTION public.refresh_data() RETURNS INT;"
+    )
 
 
 def test_parse_create_procedure(tmp_path: Path) -> None:
-    objects = _parse(tmp_path, "CREATE PROCEDURE public.refresh_data();")
+    sql = "CREATE PROCEDURE public.refresh_data();"
+    objects = _parse(tmp_path, sql)
 
     assert objects[0].object_type is ObjectType.PROCEDURE
     assert objects[0].qualified_name == "public.refresh_data"
+    assert objects[0].description == sql
+
+
+def test_parse_create_or_replace_procedure(tmp_path: Path) -> None:
+    sql = "CREATE OR REPLACE PROCEDURE public.refresh_data() AS $$ BEGIN NULL; END; $$;"
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.PROCEDURE
+    assert objects[0].name == "refresh_data"
+    assert objects[0].description == sql
+
+
+def test_parse_procedure_with_greenplum_options(tmp_path: Path) -> None:
+    sql = """
+    CREATE OR REPLACE PROCEDURE DB_OWNER.refresh_data()
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = DB_OWNER
+    AS $$ BEGIN NULL; END; $$;
+    """
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.PROCEDURE
+    assert objects[0].qualified_name == "DB_OWNER.refresh_data"
+    assert "SECURITY DEFINER" in (objects[0].description or "")
+    assert "SET search_path" in (objects[0].description or "")
+
+
+def test_parse_command_style_create_function(tmp_path: Path) -> None:
+    sql = """
+    CREATE OR REPLACE FUNCTION DB_OWNER.proc_update()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.FUNCTION
+    assert objects[0].qualified_name == "DB_OWNER.proc_update"
+    assert objects[0].name == "proc_update"
+    assert objects[0].description == sql
+
+
+def test_parse_function_preserves_language_and_return_type(tmp_path: Path) -> None:
+    sql = """
+    CREATE OR REPLACE FUNCTION public.calculate_total(amount NUMERIC)
+    RETURNS TABLE (total NUMERIC)
+    LANGUAGE SQL
+    AS $$ SELECT amount $$;
+    """
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.FUNCTION
+    assert objects[0].qualified_name == "public.calculate_total"
+    assert "RETURNS TABLE (total NUMERIC)" in (objects[0].description or "")
+    assert "LANGUAGE SQL" in (objects[0].description or "")
+
+
+def test_parse_function_with_return_type_and_language(tmp_path: Path) -> None:
+    sql = """
+    CREATE FUNCTION public.is_valid(value TEXT)
+    RETURNS BOOLEAN
+    AS $$ SELECT value IS NOT NULL $$
+    LANGUAGE plpgsql;
+    """
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.FUNCTION
+    assert "RETURNS BOOLEAN" in (objects[0].description or "")
+    assert "LANGUAGE plpgsql" in (objects[0].description or "")
 
 
 def test_parse_create_trigger(tmp_path: Path) -> None:
@@ -51,6 +222,36 @@ def test_parse_create_trigger(tmp_path: Path) -> None:
     assert objects[0].object_type is ObjectType.TRIGGER
     assert objects[0].name == "customer_insert"
     assert objects[0].qualified_name == "customer_insert"
+    assert objects[0].description == sql
+
+
+def test_parse_after_trigger_with_multiple_events(tmp_path: Path) -> None:
+    sql = (
+        "CREATE TRIGGER audit_changes AFTER INSERT OR UPDATE OR DELETE "
+        "ON DB_OWNER.customer FOR EACH ROW "
+        "EXECUTE PROCEDURE DB_OWNER.audit_customer();"
+    )
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TRIGGER
+    assert objects[0].name == "audit_changes"
+    assert "AFTER INSERT OR UPDATE OR DELETE" in (objects[0].description or "")
+    assert "ON DB_OWNER.customer" in (objects[0].description or "")
+
+
+def test_parse_instead_of_trigger_on_schema_qualified_table(tmp_path: Path) -> None:
+    sql = (
+        "CREATE TRIGGER view_update INSTEAD OF UPDATE ON reporting.customer_view "
+        "FOR EACH ROW EXECUTE FUNCTION reporting.update_customer();"
+    )
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TRIGGER
+    assert objects[0].qualified_name == "view_update"
+    assert "INSTEAD OF UPDATE" in (objects[0].description or "")
+    assert "ON reporting.customer_view" in (objects[0].description or "")
 
 
 def test_parse_multiple_create_statements(tmp_path: Path) -> None:
@@ -72,3 +273,140 @@ def test_parse_ignores_unsupported_statements(tmp_path: Path) -> None:
     )
 
     assert objects == []
+
+
+def test_parse_sql_server_bracketed_table_batch(tmp_path: Path) -> None:
+    sql = """IF EXISTS (SELECT 1 FROM sys.objects)
+DROP TABLE [dbo].[customer]
+GO
+CREATE TABLE [dbo].[customer] (id INT) ON [PRIMARY]
+GO
+"""
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TABLE
+    assert objects[0].qualified_name == "dbo.customer"
+    assert objects[0].description == sql
+
+
+def test_parse_sql_server_view_batch(tmp_path: Path) -> None:
+    sql = """DROP VIEW [dbo].[active_customer]
+GO
+CREATE VIEW [dbo].[active_customer] AS SELECT 1
+GO
+"""
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.VIEW
+    assert objects[0].qualified_name == "dbo.active_customer"
+
+
+def test_parse_sql_server_proc_alias(tmp_path: Path) -> None:
+    sql = "CREATE proc [dbo].[refresh_data] AS SELECT 1;"
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.PROCEDURE
+    assert objects[0].qualified_name == "dbo.refresh_data"
+
+
+def test_parse_sql_server_alter_procedure(tmp_path: Path) -> None:
+    sql = "ALTER procedure [dbo].[refresh_data] AS SELECT 1;"
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.PROCEDURE
+    assert objects[0].qualified_name == "dbo.refresh_data"
+
+
+def test_parse_table_columns_and_constraints(tmp_path: Path) -> None:
+    sql = """CREATE TABLE sales.customer (
+        customer_id INT NOT NULL,
+        customer_code VARCHAR(20) UNIQUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT pk_customer PRIMARY KEY (customer_id)
+    );"""
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    columns = objects[0].columns
+    assert [column.column_name for column in columns] == [
+        "customer_id",
+        "customer_code",
+        "created_at",
+    ]
+    assert columns[0].ordinal_position == 1
+    assert columns[0].datatype == "INT"
+    assert columns[0].nullable is False
+    assert columns[0].is_primary_key is True
+    assert columns[1].datatype == "VARCHAR(20)"
+    assert columns[1].is_unique is True
+    assert columns[2].default_value == "CURRENT_TIMESTAMP()"
+    assert columns[2].nullable is True
+    assert all(column.object_id == objects[0].object_id for column in columns)
+
+
+def test_non_table_objects_have_no_columns(tmp_path: Path) -> None:
+    objects = _parse(tmp_path, "CREATE VIEW sales.customer_view AS SELECT 1;")
+
+    assert len(objects) == 1
+    assert objects[0].columns == ()
+
+
+def _properties(metadata_object) -> dict[str, str]:
+    return {
+        item.property_name: item.property_value for item in metadata_object.properties
+    }
+
+
+def test_resolves_literal_and_constant_variable_dynamic_sql(tmp_path: Path) -> None:
+    sql = """
+    CREATE PROCEDURE sales.refresh AS
+    BEGIN
+        DECLARE @sql nvarchar(max) = 'SELECT * FROM sales.customer';
+        EXEC(@sql);
+    END;
+    """
+
+    obj = _parse(tmp_path, sql)[0]
+    properties = _properties(obj)
+
+    assert properties["dynamic_sql_status"] == "RESOLVED"
+    assert any(
+        candidate.target_qualified_name == "sales.customer"
+        and candidate.source_type == "RESOLVED_DYNAMIC_SQL"
+        for candidate in obj.relation_candidates
+    )
+
+
+def test_unresolved_dynamic_sql_keeps_marker_without_relations(tmp_path: Path) -> None:
+    sql = """
+    CREATE PROCEDURE sales.refresh AS
+    BEGIN
+        EXEC(@sql + @table);
+    END;
+    """
+
+    obj = _parse(tmp_path, sql)[0]
+    properties = _properties(obj)
+
+    assert properties["dynamic_sql_status"] == "UNRESOLVED"
+    assert properties["dynamic_sql_source"] == sql
+    assert obj.relation_candidates == ()
+
+
+def test_trigger_preserves_update_of_columns(tmp_path: Path) -> None:
+    sql = """
+    CREATE TRIGGER sales.audit_customer
+    AFTER UPDATE OF customer_id, status ON sales.customer
+    FOR EACH ROW EXECUTE FUNCTION sales.audit_fn();
+    """
+
+    obj = _parse(tmp_path, sql)[0]
+    properties = _properties(obj)
+
+    assert properties["trigger_timing"] == "AFTER"
+    assert properties["trigger_update_columns"] == "customer_id,status"

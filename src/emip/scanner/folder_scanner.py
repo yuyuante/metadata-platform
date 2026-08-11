@@ -14,4 +14,5 @@ class FolderScanner:
             candidate.resolve()
             for candidate in absolute_root.rglob("*")
             if candidate.is_file()
+            and not candidate.name.lower().endswith(".testsuite.sql")
         )
