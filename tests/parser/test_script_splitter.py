@@ -27,12 +27,14 @@ def test_statement_filter_keeps_supported_create_statements() -> None:
     statements = [
         "DROP TABLE IF EXISTS sales.customer;",
         "-- comment\nCREATE TABLE sales.customer (id INT);",
+        "CREATE MATERIALIZED VIEW sales.customer_snapshot AS SELECT 1;",
         "CREATE INDEX ix_customer ON sales.customer (id);",
         "INSERT INTO sales.customer VALUES (1);",
     ]
 
     assert StatementFilter().filter(statements) == [
-        "CREATE TABLE sales.customer (id INT);"
+        "CREATE TABLE sales.customer (id INT);",
+        "CREATE MATERIALIZED VIEW sales.customer_snapshot AS SELECT 1;",
     ]
 
 

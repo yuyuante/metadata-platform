@@ -3,7 +3,8 @@
 import re
 
 _SUPPORTED = re.compile(
-    r"^CREATE\s+(?:OR\s+REPLACE\s+)?" r"(?:TABLE|VIEW|FUNCTION|PROCEDURE|TRIGGER)\b",
+    r"^CREATE\s+(?:OR\s+REPLACE\s+)?"
+    r"(?:TABLE|MATERIALIZED\s+VIEW|VIEW|FUNCTION|PROCEDURE|TRIGGER)\b",
     re.IGNORECASE,
 )
 

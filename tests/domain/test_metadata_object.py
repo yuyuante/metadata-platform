@@ -38,6 +38,7 @@ def test_enum_values_are_exact() -> None:
     assert [member.value for member in ObjectType] == [
         "TABLE",
         "VIEW",
+        "MATERIALIZED_VIEW",
         "FUNCTION",
         "PROCEDURE",
         "TRIGGER",

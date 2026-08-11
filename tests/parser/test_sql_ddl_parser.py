@@ -69,6 +69,31 @@ def test_parse_greenplum_distribute_typo_used_in_source_table(tmp_path: Path) ->
     assert objects[0].object_type is ObjectType.TABLE
 
 
+def test_parse_create_materialized_view(tmp_path: Path) -> None:
+    sql = "CREATE MATERIALIZED VIEW reporting.daily_customers AS SELECT 1;"
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.MATERIALIZED_VIEW
+    assert objects[0].qualified_name == "reporting.daily_customers"
+    assert objects[0].name == "daily_customers"
+    assert objects[0].description == sql
+
+
+def test_parse_create_materialized_view_as_select(tmp_path: Path) -> None:
+    sql = """
+    CREATE MATERIALIZED VIEW DB_OWNER.mv_customer AS
+    SELECT customer_id, customer_name
+    FROM DB_OWNER.customer;
+    """
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.MATERIALIZED_VIEW
+    assert objects[0].qualified_name == "DB_OWNER.mv_customer"
+    assert "FROM DB_OWNER.customer" in (objects[0].description or "")
+
+
 def test_parse_create_view(tmp_path: Path) -> None:
     sql = "CREATE VIEW reporting.customers AS SELECT 1;"
     objects = _parse(tmp_path, sql)
@@ -197,6 +222,36 @@ def test_parse_create_trigger(tmp_path: Path) -> None:
     assert objects[0].object_type is ObjectType.TRIGGER
     assert objects[0].name == "customer_insert"
     assert objects[0].qualified_name == "customer_insert"
+    assert objects[0].description == sql
+
+
+def test_parse_after_trigger_with_multiple_events(tmp_path: Path) -> None:
+    sql = (
+        "CREATE TRIGGER audit_changes AFTER INSERT OR UPDATE OR DELETE "
+        "ON DB_OWNER.customer FOR EACH ROW "
+        "EXECUTE PROCEDURE DB_OWNER.audit_customer();"
+    )
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TRIGGER
+    assert objects[0].name == "audit_changes"
+    assert "AFTER INSERT OR UPDATE OR DELETE" in (objects[0].description or "")
+    assert "ON DB_OWNER.customer" in (objects[0].description or "")
+
+
+def test_parse_instead_of_trigger_on_schema_qualified_table(tmp_path: Path) -> None:
+    sql = (
+        "CREATE TRIGGER view_update INSTEAD OF UPDATE ON reporting.customer_view "
+        "FOR EACH ROW EXECUTE FUNCTION reporting.update_customer();"
+    )
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TRIGGER
+    assert objects[0].qualified_name == "view_update"
+    assert "INSTEAD OF UPDATE" in (objects[0].description or "")
+    assert "ON reporting.customer_view" in (objects[0].description or "")
 
 
 def test_parse_multiple_create_statements(tmp_path: Path) -> None:
