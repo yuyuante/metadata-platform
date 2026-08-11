@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Self
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
-    from .domain import Column
+    from .domain import Column, ObjectProperty, RelationCandidate
 
 
 class ObjectType(StrEnum):
@@ -57,6 +57,8 @@ class MetadataObject:
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
     columns: tuple[Column, ...] = ()
+    properties: tuple[ObjectProperty, ...] = ()
+    relation_candidates: tuple[RelationCandidate, ...] = ()
 
     def __post_init__(self) -> None:
         """Set the display name and validate required names."""
@@ -82,6 +84,8 @@ class MetadataObject:
         owner_name: str | None = None,
         status: ObjectStatus = ObjectStatus.ACTIVE,
         columns: tuple[Column, ...] = (),
+        properties: tuple[ObjectProperty, ...] = (),
+        relation_candidates: tuple[RelationCandidate, ...] = (),
     ) -> Self:
         """Create a metadata object with generated identity and timestamps."""
 
@@ -98,6 +102,8 @@ class MetadataObject:
             created_at=_utc_now(),
             updated_at=_utc_now(),
             columns=columns,
+            properties=properties,
+            relation_candidates=relation_candidates,
         )
 
 

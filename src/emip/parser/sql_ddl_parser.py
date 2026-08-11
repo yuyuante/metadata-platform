@@ -7,7 +7,14 @@ from uuid import UUID
 import sqlglot
 from sqlglot import exp
 
-from emip.domain import Column, MetadataObject, ObjectType
+from emip.domain import (
+    Column,
+    MetadataObject,
+    ObjectProperty,
+    ObjectType,
+    RelationCandidate,
+    RelationType,
+)
 
 _SUPPORTED_TYPES: dict[str, ObjectType] = {
     "TABLE": ObjectType.TABLE,
@@ -44,15 +51,17 @@ class SqlDdlParser:
         source = path.read_text(encoding="utf-8")
         mssql_objects = _mssql_objects(path, source)
         if mssql_objects is not None:
-            return mssql_objects
+            return _with_relationships(mssql_objects, source)
         if _is_create_function(source):
-            return [_function_object(path, source)]
+            return _with_relationships([_function_object(path, source)], source)
         if _is_create_procedure(source):
-            return [_procedure_object(path, source)]
+            return _with_relationships([_procedure_object(path, source)], source)
         if _is_create_trigger(source):
-            return [_trigger_object(path, source)]
+            return _with_relationships([_trigger_object(path, source)], source)
         if _is_create_materialized_view(source):
-            return [_materialized_view_object(path, source)]
+            return _with_relationships(
+                [_materialized_view_object(path, source)], source
+            )
         statements = sqlglot.parse(source, read="postgres")
         if any(isinstance(statement, exp.Command) for statement in statements):
             compatible_source = _remove_greenplum_distribution(source)
@@ -93,7 +102,130 @@ class SqlDdlParser:
                     metadata_object.object_id,
                 )
             objects.append(metadata_object)
-        return objects
+        return _with_relationships(objects, source)
+
+
+_IDENTIFIER = r"(?:\[[^]]+\]|" + r'"[^" ]+"' + r"|[A-Za-z_#][\w$#@]*)"
+_REF = rf"({_IDENTIFIER}(?:\s*\.\s*{_IDENTIFIER}){{0,2}})"
+_DYNAMIC = re.compile(
+    r"\b(?:EXEC(?:UTE)?\s*\(|EXECUTE\s+IMMEDIATE\b|sp_executesql\b|\bEXECUTE\s+[^'\"\s]+\s*\+)",
+    re.I,
+)
+_LITERAL_EXEC = re.compile(
+    r"\b(?:EXEC|EXECUTE)\s*\(\s*(['\"])(.*?)\1\s*\)", re.I | re.S
+)
+
+
+def _clean_ref(value: str) -> str:
+    return ".".join(part.strip().strip('[]"') for part in value.split("."))
+
+
+def _with_relationships(
+    objects: list[MetadataObject], source: str
+) -> list[MetadataObject]:
+    """Attach conservative, evidence-backed relation candidates to parsed objects."""
+    dynamic = _DYNAMIC.search(source) is not None
+    resolved = _LITERAL_EXEC.search(source)
+    relation_sql = source
+    source_type = "STATIC_SQL"
+    if dynamic and resolved is not None:
+        relation_sql = resolved.group(2)
+        source_type = "RESOLVED_DYNAMIC_SQL"
+    for obj in objects:
+        candidates: list[RelationCandidate] = []
+        if dynamic and resolved is None:
+            obj.properties = (
+                ObjectProperty(
+                    property_name="contains_dynamic_sql", property_value="true"
+                ),
+                ObjectProperty(
+                    property_name="dynamic_sql_source", property_value=source
+                ),
+            )
+        elif dynamic:
+            obj.properties = (
+                ObjectProperty(
+                    property_name="contains_dynamic_sql", property_value="true"
+                ),
+                ObjectProperty(
+                    property_name="dynamic_sql_source", property_value=source
+                ),
+            )
+
+        current_obj = obj
+        current_candidates = candidates
+
+        def add(
+            pattern: str, kind: RelationType, evidence: str = relation_sql
+        ) -> None:  # noqa: B023
+            for match in re.finditer(pattern, relation_sql, re.I | re.S):
+                target = _clean_ref(match.group(1))
+                if target.upper() in {
+                    "SELECT",
+                    "VALUES",
+                    "DUAL",
+                    current_obj.qualified_name.upper(),  # noqa: B023
+                }:
+                    continue
+                current_candidates.append(  # noqa: B023
+                    RelationCandidate(
+                        current_obj.qualified_name,  # noqa: B023
+                        target,
+                        kind,
+                        source_type,
+                        evidence,
+                    )
+                )
+
+        if obj.object_type in {
+            ObjectType.VIEW,
+            ObjectType.MATERIALIZED_VIEW,
+            ObjectType.FUNCTION,
+            ObjectType.PROCEDURE,
+        }:
+            add(rf"\bFROM\s+{_REF}", RelationType.READS)
+            add(rf"\bJOIN\s+{_REF}", RelationType.READS)
+        if obj.object_type in {ObjectType.PROCEDURE, ObjectType.TRIGGER}:
+            add(
+                rf"\b(?:INSERT\s+INTO|UPDATE\s+(?!ON\b)|DELETE\s+FROM|MERGE\s+INTO)\s+{_REF}",
+                RelationType.WRITES,
+            )
+        if obj.object_type is ObjectType.TRIGGER:
+            add(rf"\bON\s+{_REF}", RelationType.TARGET)
+        if obj.object_type in {
+            ObjectType.FUNCTION,
+            ObjectType.PROCEDURE,
+            ObjectType.TRIGGER,
+        }:
+            add(
+                rf"\b(?:CALL|PERFORM|EXEC(?:UTE)?(?:\s+(?:FUNCTION|PROCEDURE))?)\s+{_REF}",
+                RelationType.CALLS,
+            )
+            add(rf"\b({_IDENTIFIER}\s*\.\s*{_IDENTIFIER})\s*\(", RelationType.CALLS)
+        # Preserve trigger timing/event metadata without creating a relation.
+        if obj.object_type is ObjectType.TRIGGER:
+            timing = re.search(r"\b(BEFORE|AFTER|INSTEAD\s+OF)\b", source, re.I)
+            events = re.findall(r"\b(INSERT|UPDATE|DELETE|TRUNCATE)\b", source, re.I)
+            props = list(obj.properties)
+            if timing:
+                props.append(
+                    ObjectProperty(
+                        property_name="trigger_timing",
+                        property_value=timing.group(1).upper(),
+                    )
+                )
+            if events:
+                props.append(
+                    ObjectProperty(
+                        property_name="trigger_events",
+                        property_value=",".join(
+                            dict.fromkeys(e.upper() for e in events)
+                        ),
+                    )
+                )
+            obj.properties = tuple(props)
+        obj.relation_candidates = tuple(dict.fromkeys(candidates))
+    return objects
 
 
 def _table_columns(statement: exp.Create, object_id: UUID) -> tuple[Column, ...]:
@@ -313,16 +445,10 @@ def _materialized_view_names(source: str) -> tuple[str, str]:
 
 
 def _trigger_object(path: Path, source: str) -> MetadataObject:
-    """Create trigger metadata without parsing trigger dependencies."""
+    """Create trigger metadata from its identifier without parsing its body."""
 
-    metadata_statement = _trigger_metadata_statement(source)
-    statements = sqlglot.parse(metadata_statement, read="postgres")
-    statement = statements[0]
-    if not isinstance(statement, exp.Create):
-        raise UnsupportedSqlSyntaxError(
-            "SQLGlot did not produce a CREATE AST for a trigger."
-        )
-    name, qualified_name = _object_names(statement)
+    _, qualified_name = _trigger_names(source)
+    name = qualified_name.rsplit(".", 1)[-1].strip('"[]')
     return MetadataObject.create(
         object_type=ObjectType.TRIGGER,
         system_name=path.stem,

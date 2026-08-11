@@ -8,8 +8,16 @@ import psycopg2  # type: ignore[import-untyped]
 from psycopg2 import sql
 
 from emip.database import DatabaseConnection, DatabaseNaming
-from emip.database.tables import COLUMN, OBJECT
-from emip.domain import Column, MetadataObject, ObjectStatus, ObjectType
+from emip.database.tables import COLUMN, OBJECT, PROPERTY, RELATION
+from emip.domain import (
+    Column,
+    MetadataObject,
+    ObjectProperty,
+    ObjectStatus,
+    ObjectType,
+    Relation,
+    RelationCandidate,
+)
 
 _OBJECT_COLUMNS = (
     "OBJECT_ID",
@@ -40,6 +48,10 @@ _COLUMN_COLUMNS = (
 )
 _COLUMN_RETURNING_COLUMNS = sql.SQL(", ").join(
     sql.Identifier(column_name.lower()) for column_name in _COLUMN_COLUMNS
+)
+_PROPERTY_COLUMNS = ("PROPERTY_ID", "OBJECT_ID", "PROPERTY_NAME", "PROPERTY_VALUE")
+_PROPERTY_RETURNING_COLUMNS = sql.SQL(", ").join(
+    sql.Identifier(column_name.lower()) for column_name in _PROPERTY_COLUMNS
 )
 
 
@@ -111,8 +123,21 @@ class MetadataRepository:
             settings.schema,
             settings.table_prefix,
         ).table(COLUMN)
+        qualified_relation_table = DatabaseNaming(
+            settings.schema,
+            settings.table_prefix,
+        ).table(RELATION)
+        self._relation_table_identifier = sql.Identifier(
+            *(part.lower() for part in qualified_relation_table.split("."))
+        )
         self._column_table_identifier = sql.Identifier(
             *(part.lower() for part in qualified_column_table.split("."))
+        )
+        qualified_property_table = DatabaseNaming(
+            settings.schema, settings.table_prefix
+        ).table(PROPERTY)
+        self._property_table_identifier = sql.Identifier(
+            *(part.lower() for part in qualified_property_table.split("."))
         )
 
     def create_object(self, metadata_object: MetadataObject) -> MetadataObject:
@@ -140,12 +165,17 @@ class MetadataRepository:
                 cursor.execute(query, values)
                 row = cursor.fetchone()
                 self._insert_columns(cursor, metadata_object.columns)
+                self._insert_properties(
+                    cursor, metadata_object.object_id, metadata_object.properties
+                )
             self._connection.commit()
         except psycopg2.Error:
             self._connection.rollback()
             raise
         created_object = _row_to_metadata_object(row)
         created_object.columns = self._load_columns(created_object.object_id)
+        created_object.properties = self._load_properties(created_object.object_id)
+        created_object.relation_candidates = metadata_object.relation_candidates
         return created_object
 
     def get_object(self, metadata_object: MetadataObject) -> MetadataObject | None:
@@ -163,6 +193,9 @@ class MetadataRepository:
             return None
         metadata_object_result = _row_to_metadata_object(row)
         metadata_object_result.columns = self._load_columns(
+            metadata_object_result.object_id
+        )
+        metadata_object_result.properties = self._load_properties(
             metadata_object_result.object_id
         )
         return metadata_object_result
@@ -212,6 +245,10 @@ class MetadataRepository:
                         metadata_object.object_id,
                         metadata_object.columns,
                     )
+                if row is not None and metadata_object.properties:
+                    self._replace_properties(
+                        cursor, metadata_object.object_id, metadata_object.properties
+                    )
             self._connection.commit()
         except psycopg2.Error:
             self._connection.rollback()
@@ -220,6 +257,7 @@ class MetadataRepository:
             return None
         updated_object = _row_to_metadata_object(row)
         updated_object.columns = self._load_columns(updated_object.object_id)
+        updated_object.properties = self._load_properties(updated_object.object_id)
         return updated_object
 
     def _insert_columns(self, cursor: Any, columns: tuple[Column, ...]) -> None:
@@ -246,6 +284,54 @@ class MetadataRepository:
                 )
                 for column in columns
             ],
+        )
+
+    def _insert_properties(
+        self, cursor: Any, object_id: UUID, properties: tuple[ObjectProperty, ...]
+    ) -> None:
+        if not properties:
+            return
+        query = sql.SQL("INSERT INTO {} ({}) VALUES (%s, %s, %s, %s)").format(
+            self._property_table_identifier, _PROPERTY_RETURNING_COLUMNS
+        )
+        cursor.executemany(
+            query,
+            [
+                (
+                    str(item.property_id),
+                    str(object_id),
+                    item.property_name,
+                    item.property_value,
+                )
+                for item in properties
+            ],
+        )
+
+    def _replace_properties(
+        self, cursor: Any, object_id: UUID, properties: tuple[ObjectProperty, ...]
+    ) -> None:
+        cursor.execute(
+            sql.SQL("DELETE FROM {} WHERE object_id = %s").format(
+                self._property_table_identifier
+            ),
+            (str(object_id),),
+        )
+        self._insert_properties(cursor, object_id, properties)
+
+    def _load_properties(self, object_id: UUID) -> tuple[ObjectProperty, ...]:
+        query = sql.SQL(
+            "SELECT {} FROM {} WHERE object_id = %s ORDER BY property_name"
+        ).format(_PROPERTY_RETURNING_COLUMNS, self._property_table_identifier)
+        try:
+            with self._connection.cursor() as cursor:
+                cursor.execute(query, (str(object_id),))
+                rows = cursor.fetchall()
+        except psycopg2.errors.UndefinedTable:
+            self._connection.rollback()
+            return ()
+        return tuple(
+            ObjectProperty(UUID(str(row[0])), UUID(str(row[1])), row[2], row[3])
+            for row in rows
         )
 
     def _replace_columns(
@@ -281,6 +367,97 @@ class MetadataRepository:
             self._connection.rollback()
             return ()
         return tuple(_row_to_column(row) for row in rows)
+
+    def find_object_by_identity(
+        self, system_name: str, qualified_name: str
+    ) -> MetadataObject | None:
+        """Resolve an object endpoint by repository identity."""
+        query = sql.SQL(
+            "SELECT {} FROM {} WHERE system_name = %s AND qualified_name = %s"
+        ).format(_RETURNING_COLUMNS, self._table_identifier)
+        with self._connection.cursor() as cursor:
+            cursor.execute(query, (system_name, qualified_name))
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_metadata_object(row)
+
+    def find_object_by_qualified_name(
+        self, qualified_name: str
+    ) -> MetadataObject | None:
+        """Resolve a unique endpoint when source files use different system names."""
+        query = sql.SQL("SELECT {} FROM {} WHERE qualified_name = %s LIMIT 1").format(
+            _RETURNING_COLUMNS, self._table_identifier
+        )
+        with self._connection.cursor() as cursor:
+            cursor.execute(query, (qualified_name,))
+            row = cursor.fetchone()
+        return None if row is None else _row_to_metadata_object(row)
+
+    def create_relation(self, relation: Relation) -> Relation:
+        """Insert one resolved relation; duplicate graph edges are harmless."""
+        exists_query = sql.SQL(
+            "SELECT 1 FROM {} WHERE from_object_id = %s AND to_object_id = %s "
+            "AND relation_type = %s AND source_type = %s"
+        ).format(self._relation_table_identifier)
+        insert_query = sql.SQL(
+            "INSERT INTO {} (relation_id, from_object_id, to_object_id, "
+            "relation_type, source_type, created_at) VALUES (%s,%s,%s,%s,%s,%s)"
+        ).format(self._relation_table_identifier)
+        try:
+            with self._connection.cursor() as cursor:
+                cursor.execute(
+                    exists_query,
+                    (
+                        str(relation.source_object_id),
+                        str(relation.target_object_id),
+                        str(relation.relation_type),
+                        relation.source_type,
+                    ),
+                )
+                if cursor.fetchone() is None:
+                    cursor.execute(
+                        insert_query,
+                        (
+                            str(relation.relation_id),
+                            str(relation.source_object_id),
+                            str(relation.target_object_id),
+                            str(relation.relation_type),
+                            relation.source_type,
+                            _to_database_timestamp(relation.created_at),
+                        ),
+                    )
+            self._connection.commit()
+        except psycopg2.Error:
+            self._connection.rollback()
+            raise
+        return relation
+
+    def create_relations(
+        self, candidates: list[tuple[MetadataObject, RelationCandidate]]
+    ) -> int:
+        """Resolve and persist only candidates whose target already exists."""
+        count = 0
+        for source, candidate in candidates:
+            target = self.find_object_by_identity(
+                source.system_name, candidate.target_qualified_name
+            )
+            if target is None:
+                target = self.find_object_by_qualified_name(
+                    candidate.target_qualified_name
+                )
+            if target is None:
+                continue
+            self.create_relation(
+                Relation(
+                    source_object_id=source.object_id,
+                    target_object_id=target.object_id,
+                    relation_type=candidate.relation_type,
+                    source_type=candidate.source_type,
+                )
+            )
+            count += 1
+        return count
 
     def delete_object(self, metadata_object: MetadataObject) -> MetadataObject | None:
         """Delete and return a MetadataObject, or None when it does not exist."""
