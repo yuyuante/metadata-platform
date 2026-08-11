@@ -3,8 +3,9 @@
 import re
 
 _SUPPORTED = re.compile(
-    r"^CREATE\s+(?:OR\s+REPLACE\s+)?"
-    r"(?:TABLE|MATERIALIZED\s+VIEW|VIEW|FUNCTION|PROCEDURE|TRIGGER)\b",
+    r"(?:(?:CREATE\s+(?:(?:OR\s+REPLACE)|(?:OR\s+ALTER))?\s*)|"
+    r"(?:ALTER\s+))"
+    r"(?:TABLE|MATERIALIZED\s+VIEW|VIEW|FUNCTION|PROCEDURE|PROC|TRIGGER)\b",
     re.IGNORECASE,
 )
 
@@ -18,7 +19,13 @@ class StatementFilter:
         filtered: list[str] = []
         for statement in statements:
             normalized = _remove_leading_comments(statement.lstrip("\ufeff")).strip()
-            if _SUPPORTED.match(normalized):
+            if _SUPPORTED.search(normalized):
+                if re.search(
+                    r"CREATE\s+(?:OR\s+ALTER\s+)?TABLE\s+#",
+                    normalized,
+                    re.IGNORECASE,
+                ):
+                    continue
                 filtered.append(normalized)
         return filtered
 

@@ -21,6 +21,13 @@ _GREENPLUM_DISTRIBUTION = re.compile(
     r"\bDISTRIBUT(?:ED|E)\s+(?:BY\b|RANDOMLY\b|REPLICATED\b).*?(?=;|$)",
     re.IGNORECASE | re.DOTALL,
 )
+_MSSQL_CREATE = re.compile(
+    r"\b(?:CREATE\s+(?:OR\s+ALTER\s+)?|ALTER\s+)"
+    r"(?P<kind>TABLE|VIEW|FUNCTION|PROCEDURE|PROC)\s+"
+    r"(?P<name>(?:\[[^]]+\]|[#A-Za-z_][\w$#@]*)"
+    r"(?:\s*\.\s*(?:\[[^]]+\]|[#A-Za-z_][\w$#@]*))?)",
+    re.IGNORECASE,
+)
 
 
 class UnsupportedSqlSyntaxError(ValueError):
@@ -34,6 +41,9 @@ class SqlDdlParser:
         """Parse supported CREATE statements from a SQL file."""
 
         source = path.read_text(encoding="utf-8")
+        mssql_objects = _mssql_objects(path, source)
+        if mssql_objects is not None:
+            return mssql_objects
         if _is_create_function(source):
             return [_function_object(path, source)]
         if _is_create_procedure(source):
@@ -79,6 +89,45 @@ class SqlDdlParser:
                 )
             )
         return objects
+
+
+def _mssql_objects(path: Path, source: str) -> list[MetadataObject] | None:
+    """Extract one SQL Server DDL object without parsing its body."""
+
+    match = _MSSQL_CREATE.search(source)
+    if match is None:
+        return None
+    if not (
+        "[" in match.group("name")
+        or "[" in source
+        or re.search(
+            r"\b(?:GO|OBJECT_ID|sys\.|CLUSTERED|NONCLUSTERED|IDENTITY|GRANT)\b",
+            source,
+            re.IGNORECASE,
+        )
+        or re.search(r"\bCREATE\s+OR\s+ALTER\b", source, re.IGNORECASE)
+    ):
+        return None
+    object_type = {
+        "TABLE": ObjectType.TABLE,
+        "VIEW": ObjectType.VIEW,
+        "FUNCTION": ObjectType.FUNCTION,
+        "PROCEDURE": ObjectType.PROCEDURE,
+        "PROC": ObjectType.PROCEDURE,
+    }[match.group("kind").upper()]
+    qualified_name = ".".join(
+        part.strip().strip("[]") for part in match.group("name").split(".")
+    )
+    name = qualified_name.rsplit(".", 1)[-1]
+    return [
+        MetadataObject.create(
+            object_type=object_type,
+            system_name=path.stem,
+            qualified_name=qualified_name,
+            name=name,
+            description=source,
+        )
+    ]
 
 
 def _function_object(path: Path, source: str) -> MetadataObject:

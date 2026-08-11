@@ -273,3 +273,49 @@ def test_parse_ignores_unsupported_statements(tmp_path: Path) -> None:
     )
 
     assert objects == []
+
+
+def test_parse_sql_server_bracketed_table_batch(tmp_path: Path) -> None:
+    sql = """IF EXISTS (SELECT 1 FROM sys.objects)
+DROP TABLE [dbo].[customer]
+GO
+CREATE TABLE [dbo].[customer] (id INT) ON [PRIMARY]
+GO
+"""
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TABLE
+    assert objects[0].qualified_name == "dbo.customer"
+    assert objects[0].description == sql
+
+
+def test_parse_sql_server_view_batch(tmp_path: Path) -> None:
+    sql = """DROP VIEW [dbo].[active_customer]
+GO
+CREATE VIEW [dbo].[active_customer] AS SELECT 1
+GO
+"""
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.VIEW
+    assert objects[0].qualified_name == "dbo.active_customer"
+
+
+def test_parse_sql_server_proc_alias(tmp_path: Path) -> None:
+    sql = "CREATE proc [dbo].[refresh_data] AS SELECT 1;"
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.PROCEDURE
+    assert objects[0].qualified_name == "dbo.refresh_data"
+
+
+def test_parse_sql_server_alter_procedure(tmp_path: Path) -> None:
+    sql = "ALTER procedure [dbo].[refresh_data] AS SELECT 1;"
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.PROCEDURE
+    assert objects[0].qualified_name == "dbo.refresh_data"

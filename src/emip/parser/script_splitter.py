@@ -3,6 +3,7 @@
 import re
 
 _DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+_GO_BATCH = re.compile(r"(?im)^[ \t]*GO[ \t]*(?:--[^\r\n]*)?(?:\r?\n|$)")
 
 
 class ScriptSplitter:
@@ -10,6 +11,13 @@ class ScriptSplitter:
 
     def split(self, script: str) -> list[str]:
         """Return non-empty SQL statements in source order."""
+
+        batches = _GO_BATCH.split(script)
+        if len(batches) > 1:
+            split_statements: list[str] = []
+            for batch in batches:
+                split_statements.extend(self.split(batch))
+            return split_statements
 
         statements: list[str] = []
         start = 0
