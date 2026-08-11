@@ -46,3 +46,20 @@ The migration is idempotent for repeated execution: table creation uses `IF NOT 
 ## Naming convention
 
 All EMIP tables must begin with `EMIP_`. Constraint names use the `EMIP_PK_` or `EMIP_UQ_` prefix. Explicit index names must begin with `EMIP_IDX_`. No dedicated application schema is introduced; the table is created in the active database schema according to the migration execution context.
+## EMIP_COLUMN
+
+`EMIP_COLUMN` stores column metadata extracted from table DDL. Migration: `scripts/sql/003_create_emip_column.sql`.
+
+| Column | Type | Nullable | Description |
+|---|---|---:|---|
+| `COLUMN_ID` | `UUID` | No | Stable column identifier. |
+| `OBJECT_ID` | `UUID` | No | Parent metadata object identifier. |
+| `COLUMN_NAME` | `VARCHAR(255)` | No | Source column name. |
+| `ORDINAL_POSITION` | `INTEGER` | No | One-based source order. |
+| `DATATYPE` | `VARCHAR(255)` | Yes | Source datatype text. |
+| `NULLABLE` | `BOOLEAN` | No | Whether NULL is allowed. |
+| `DEFAULT_VALUE` | `TEXT` | Yes | Source default expression. |
+| `IS_PRIMARY_KEY` | `BOOLEAN` | No | Primary-key participation flag. |
+| `IS_UNIQUE` | `BOOLEAN` | No | Unique-constraint participation flag. |
+
+The table uses `EMIP_PK_COLUMN`, `EMIP_UK_COLUMN`, and `EMIP_IDX_COLUMN_OBJECT`. Object and column rows are persisted in the same repository transaction. The repository remains readable before this migration is applied and returns no columns until the table exists.

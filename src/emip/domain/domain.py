@@ -85,6 +85,8 @@ class Column:
     datatype: str | None = None
     nullable: bool = True
     default_value: str | None = None
+    is_primary_key: bool = False
+    is_unique: bool = False
 
 
 @dataclass(slots=True)

@@ -2,11 +2,12 @@
 
 import re
 from pathlib import Path
+from uuid import UUID
 
 import sqlglot
 from sqlglot import exp
 
-from emip.domain import MetadataObject, ObjectType
+from emip.domain import Column, MetadataObject, ObjectType
 
 _SUPPORTED_TYPES: dict[str, ObjectType] = {
     "TABLE": ObjectType.TABLE,
@@ -75,20 +76,90 @@ class SqlDdlParser:
             if object_type is None:
                 continue
             name, qualified_name = _object_names(statement)
-            objects.append(
-                MetadataObject.create(
-                    object_type=object_type,
-                    system_name=system_name,
-                    qualified_name=qualified_name,
-                    name=name,
-                    description=(
-                        source
-                        if object_type in {ObjectType.VIEW, ObjectType.FUNCTION}
-                        else None
-                    ),
-                )
+            metadata_object = MetadataObject.create(
+                object_type=object_type,
+                system_name=system_name,
+                qualified_name=qualified_name,
+                name=name,
+                description=(
+                    source
+                    if object_type in {ObjectType.VIEW, ObjectType.FUNCTION}
+                    else None
+                ),
             )
+            if object_type is ObjectType.TABLE:
+                metadata_object.columns = _table_columns(
+                    statement,
+                    metadata_object.object_id,
+                )
+            objects.append(metadata_object)
         return objects
+
+
+def _table_columns(statement: exp.Create, object_id: UUID) -> tuple[Column, ...]:
+    """Extract column metadata from a SQLGlot CREATE TABLE AST."""
+
+    schema = statement.this
+    if not isinstance(schema, exp.Schema):
+        return ()
+    column_definitions = [
+        expression
+        for expression in schema.expressions
+        if isinstance(expression, exp.ColumnDef)
+    ]
+    primary_key_names: set[str] = set()
+    unique_names: set[str] = set()
+    for expression in schema.expressions:
+        if not isinstance(expression, exp.Constraint):
+            continue
+        for node in expression.walk():
+            if isinstance(node, exp.PrimaryKey):
+                primary_key_names.update(
+                    identifier.name for identifier in node.expressions
+                )
+            if isinstance(node, exp.UniqueColumnConstraint):
+                unique_schema = node.this
+                if isinstance(unique_schema, exp.Schema):
+                    unique_names.update(
+                        identifier.name for identifier in unique_schema.expressions
+                    )
+
+    columns: list[Column] = []
+    for ordinal_position, definition in enumerate(column_definitions, start=1):
+        column_name = definition.this.name
+        is_primary_key = False
+        is_unique = False
+        nullable = True
+        default_value: str | None = None
+        for constraint in definition.constraints:
+            kind = constraint.kind
+            if isinstance(kind, exp.PrimaryKeyColumnConstraint):
+                is_primary_key = True
+            elif isinstance(kind, exp.UniqueColumnConstraint):
+                is_unique = True
+            elif isinstance(kind, exp.NotNullColumnConstraint):
+                nullable = False
+            elif (
+                isinstance(kind, exp.DefaultColumnConstraint) and kind.this is not None
+            ):
+                default_value = kind.this.sql()
+        is_primary_key = is_primary_key or column_name in primary_key_names
+        is_unique = is_unique or column_name in unique_names
+        if is_primary_key:
+            nullable = False
+        columns.append(
+            Column(
+                object_id=object_id,
+                column_name=column_name,
+                ordinal_position=ordinal_position,
+                datatype=definition.kind.sql() if definition.kind is not None else None,
+                nullable=nullable,
+                default_value=default_value,
+                is_primary_key=is_primary_key,
+                is_unique=is_unique,
+            )
+        )
+    return tuple(columns)
 
 
 def _mssql_objects(path: Path, source: str) -> list[MetadataObject] | None:

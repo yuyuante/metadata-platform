@@ -319,3 +319,38 @@ def test_parse_sql_server_alter_procedure(tmp_path: Path) -> None:
     assert len(objects) == 1
     assert objects[0].object_type is ObjectType.PROCEDURE
     assert objects[0].qualified_name == "dbo.refresh_data"
+
+
+def test_parse_table_columns_and_constraints(tmp_path: Path) -> None:
+    sql = """CREATE TABLE sales.customer (
+        customer_id INT NOT NULL,
+        customer_code VARCHAR(20) UNIQUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT pk_customer PRIMARY KEY (customer_id)
+    );"""
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    columns = objects[0].columns
+    assert [column.column_name for column in columns] == [
+        "customer_id",
+        "customer_code",
+        "created_at",
+    ]
+    assert columns[0].ordinal_position == 1
+    assert columns[0].datatype == "INT"
+    assert columns[0].nullable is False
+    assert columns[0].is_primary_key is True
+    assert columns[1].datatype == "VARCHAR(20)"
+    assert columns[1].is_unique is True
+    assert columns[2].default_value == "CURRENT_TIMESTAMP()"
+    assert columns[2].nullable is True
+    assert all(column.object_id == objects[0].object_id for column in columns)
+
+
+def test_non_table_objects_have_no_columns(tmp_path: Path) -> None:
+    objects = _parse(tmp_path, "CREATE VIEW sales.customer_view AS SELECT 1;")
+
+    assert len(objects) == 1
+    assert objects[0].columns == ()
