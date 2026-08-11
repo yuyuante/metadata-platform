@@ -459,6 +459,41 @@ class MetadataRepository:
             count += 1
         return count
 
+    def find_upstream(self, object_id: UUID) -> list[Relation]:
+        """Return direct relations that feed the supplied object."""
+
+        return self._find_relations("to_object_id", object_id)
+
+    def find_downstream(self, object_id: UUID) -> list[Relation]:
+        """Return direct relations emitted by the supplied object."""
+
+        return self._find_relations("from_object_id", object_id)
+
+    def _find_relations(self, endpoint_column: str, object_id: UUID) -> list[Relation]:
+        query = sql.SQL(
+            "SELECT relation_id, from_object_id, to_object_id, relation_type, "
+            "source_type, created_at FROM {} WHERE {} = %s "
+            "ORDER BY created_at, relation_id"
+        ).format(self._relation_table_identifier, sql.Identifier(endpoint_column))
+        try:
+            with self._connection.cursor() as cursor:
+                cursor.execute(query, (str(object_id),))
+                rows = cursor.fetchall()
+        except psycopg2.errors.UndefinedTable:
+            self._connection.rollback()
+            return []
+        return [
+            Relation(
+                source_object_id=UUID(str(row[1])),
+                target_object_id=UUID(str(row[2])),
+                relation_type=row[3],
+                source_type=row[4],
+                created_at=_from_database_timestamp(row[5]),
+                relation_id=UUID(str(row[0])),
+            )
+            for row in rows
+        ]
+
     def delete_object(self, metadata_object: MetadataObject) -> MetadataObject | None:
         """Delete and return a MetadataObject, or None when it does not exist."""
 

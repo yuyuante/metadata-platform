@@ -354,3 +354,59 @@ def test_non_table_objects_have_no_columns(tmp_path: Path) -> None:
 
     assert len(objects) == 1
     assert objects[0].columns == ()
+
+
+def _properties(metadata_object) -> dict[str, str]:
+    return {
+        item.property_name: item.property_value for item in metadata_object.properties
+    }
+
+
+def test_resolves_literal_and_constant_variable_dynamic_sql(tmp_path: Path) -> None:
+    sql = """
+    CREATE PROCEDURE sales.refresh AS
+    BEGIN
+        DECLARE @sql nvarchar(max) = 'SELECT * FROM sales.customer';
+        EXEC(@sql);
+    END;
+    """
+
+    obj = _parse(tmp_path, sql)[0]
+    properties = _properties(obj)
+
+    assert properties["dynamic_sql_status"] == "RESOLVED"
+    assert any(
+        candidate.target_qualified_name == "sales.customer"
+        and candidate.source_type == "RESOLVED_DYNAMIC_SQL"
+        for candidate in obj.relation_candidates
+    )
+
+
+def test_unresolved_dynamic_sql_keeps_marker_without_relations(tmp_path: Path) -> None:
+    sql = """
+    CREATE PROCEDURE sales.refresh AS
+    BEGIN
+        EXEC(@sql + @table);
+    END;
+    """
+
+    obj = _parse(tmp_path, sql)[0]
+    properties = _properties(obj)
+
+    assert properties["dynamic_sql_status"] == "UNRESOLVED"
+    assert properties["dynamic_sql_source"] == sql
+    assert obj.relation_candidates == ()
+
+
+def test_trigger_preserves_update_of_columns(tmp_path: Path) -> None:
+    sql = """
+    CREATE TRIGGER sales.audit_customer
+    AFTER UPDATE OF customer_id, status ON sales.customer
+    FOR EACH ROW EXECUTE FUNCTION sales.audit_fn();
+    """
+
+    obj = _parse(tmp_path, sql)[0]
+    properties = _properties(obj)
+
+    assert properties["trigger_timing"] == "AFTER"
+    assert properties["trigger_update_columns"] == "customer_id,status"

@@ -108,12 +108,36 @@ class SqlDdlParser:
 _IDENTIFIER = r"(?:\[[^]]+\]|" + r'"[^" ]+"' + r"|[A-Za-z_#][\w$#@]*)"
 _REF = rf"({_IDENTIFIER}(?:\s*\.\s*{_IDENTIFIER}){{0,2}})"
 _DYNAMIC = re.compile(
-    r"\b(?:EXEC(?:UTE)?\s*\(|EXECUTE\s+IMMEDIATE\b|sp_executesql\b|\bEXECUTE\s+[^'\"\s]+\s*\+)",
+    r"\b(?:EXEC(?:UTE)?\s*\(|EXECUTE\s+IMMEDIATE\b|EXECUTE\s+['\"]|sp_executesql\b|\bEXECUTE\s+[^'\"\s]+\s*\+)",
     re.I,
 )
 _LITERAL_EXEC = re.compile(
     r"\b(?:EXEC|EXECUTE)\s*\(\s*(['\"])(.*?)\1\s*\)", re.I | re.S
 )
+_LITERAL_EXECUTE = re.compile(r"\bEXECUTE\s+(['\"])(.*?)\1\s*;?", re.I | re.S)
+_CONSTANT_ASSIGNMENT = re.compile(
+    r"\b(?:DECLARE\s+)?@([A-Za-z_][\w$]*)\b(?:\s+[^=;]+)?\s*=\s*(['\"])(.*?)\2\s*;",
+    re.I | re.S,
+)
+_TRIGGER_UPDATE_OF = re.compile(r"\bUPDATE\s+OF\s+(.+?)\s+ON\b", re.I | re.S)
+
+
+def _resolve_dynamic_sql(source: str) -> str | None:
+    """Return dynamic SQL only when its complete text is a constant literal."""
+
+    literal = _LITERAL_EXEC.search(source) or _LITERAL_EXECUTE.search(source)
+    if literal is not None:
+        return literal.group(2)
+    assignments = {
+        match.group(1).lower(): match.group(3)
+        for match in _CONSTANT_ASSIGNMENT.finditer(source)
+    }
+    variable_exec = re.search(
+        r"\bEXEC(?:UTE)?\s*\(\s*@([A-Za-z_][\w$]*)\s*\)", source, re.I
+    )
+    if variable_exec is not None:
+        return assignments.get(variable_exec.group(1).lower())
+    return None
 
 
 def _clean_ref(value: str) -> str:
@@ -125,21 +149,29 @@ def _with_relationships(
 ) -> list[MetadataObject]:
     """Attach conservative, evidence-backed relation candidates to parsed objects."""
     dynamic = _DYNAMIC.search(source) is not None
-    resolved = _LITERAL_EXEC.search(source)
+    resolved_sql = _resolve_dynamic_sql(source)
     relation_sql = source
     source_type = "STATIC_SQL"
-    if dynamic and resolved is not None:
-        relation_sql = resolved.group(2)
+    if dynamic and resolved_sql is not None:
+        relation_sql = resolved_sql
         source_type = "RESOLVED_DYNAMIC_SQL"
     for obj in objects:
         candidates: list[RelationCandidate] = []
-        if dynamic and resolved is None:
+        if dynamic and resolved_sql is None:
             obj.properties = (
                 ObjectProperty(
                     property_name="contains_dynamic_sql", property_value="true"
                 ),
                 ObjectProperty(
                     property_name="dynamic_sql_source", property_value=source
+                ),
+            )
+            obj.properties += (
+                ObjectProperty(
+                    property_name="dynamic_sql_status",
+                    property_value=(
+                        "RESOLVED" if resolved_sql is not None else "UNRESOLVED"
+                    ),
                 ),
             )
         elif dynamic:
@@ -149,6 +181,14 @@ def _with_relationships(
                 ),
                 ObjectProperty(
                     property_name="dynamic_sql_source", property_value=source
+                ),
+            )
+            obj.properties += (
+                ObjectProperty(
+                    property_name="dynamic_sql_status",
+                    property_value=(
+                        "RESOLVED" if resolved_sql is not None else "UNRESOLVED"
+                    ),
                 ),
             )
 
@@ -223,6 +263,20 @@ def _with_relationships(
                         ),
                     )
                 )
+            update_of = _TRIGGER_UPDATE_OF.search(source)
+            if update_of is not None:
+                columns = [
+                    _clean_ref(item.strip()) for item in update_of.group(1).split(",")
+                ]
+                if columns and all(
+                    re.fullmatch(_IDENTIFIER, item, re.I) for item in columns
+                ):
+                    props.append(
+                        ObjectProperty(
+                            property_name="trigger_update_columns",
+                            property_value=",".join(columns),
+                        )
+                    )
             obj.properties = tuple(props)
         obj.relation_candidates = tuple(dict.fromkeys(candidates))
     return objects
