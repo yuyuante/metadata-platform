@@ -70,10 +70,23 @@ def test_parse_greenplum_distribute_typo_used_in_source_table(tmp_path: Path) ->
 
 
 def test_parse_create_view(tmp_path: Path) -> None:
-    objects = _parse(tmp_path, "CREATE VIEW reporting.customers AS SELECT 1;")
+    sql = "CREATE VIEW reporting.customers AS SELECT 1;"
+    objects = _parse(tmp_path, sql)
 
     assert objects[0].object_type is ObjectType.VIEW
     assert objects[0].qualified_name == "reporting.customers"
+    assert objects[0].name == "customers"
+    assert objects[0].description == sql
+
+
+def test_parse_create_or_replace_view(tmp_path: Path) -> None:
+    sql = "CREATE OR REPLACE VIEW reporting.customers AS SELECT 1;"
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.VIEW
+    assert objects[0].qualified_name == "reporting.customers"
+    assert objects[0].description == sql
 
 
 def test_parse_create_function(tmp_path: Path) -> None:

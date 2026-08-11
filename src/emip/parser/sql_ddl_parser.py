@@ -74,6 +74,7 @@ class SqlDdlParser:
                     system_name=system_name,
                     qualified_name=qualified_name,
                     name=name,
+                    description=source if object_type is ObjectType.VIEW else None,
                 )
             )
         return objects
