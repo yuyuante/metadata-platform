@@ -12,6 +12,8 @@ Database-specific implementations are introduced through migrations and reposito
 
 Migration: `scripts/sql/001_create_emip_object.sql`
 
+Follow-up migration: `scripts/sql/002_expand_emip_object_system_name.sql` expands `SYSTEM_NAME` to `VARCHAR(255)` for production source names.
+
 Target platform: Greenplum 6.x / PostgreSQL-compatible SQL.
 
 The table uses `DISTRIBUTED REPLICATED` because this initial metadata catalog table must support both the `OBJECT_ID` primary key and the `(OBJECT_TYPE, QUALIFIED_NAME)` unique constraint without adding distribution-key columns to either required key. The table can be revisited when repository volume and workload characteristics are known.
@@ -26,7 +28,7 @@ The table uses `DISTRIBUTED REPLICATED` because this initial metadata catalog ta
 | `QUALIFIED_NAME` | `VARCHAR(1000)` | No | Fully qualified object name within its source context. |
 | `DESCRIPTION` | `TEXT` | Yes | Human-readable object description. |
 | `OWNER_NAME` | `VARCHAR(255)` | Yes | Object owner or responsible party. |
-| `SYSTEM_NAME` | `VARCHAR(100)` | Yes | Source system or platform name. |
+| `SYSTEM_NAME` | `VARCHAR(255)` | No | Source system or platform name. |
 | `STATUS` | `VARCHAR(30)` | Yes | Lifecycle or availability status. |
 | `CREATED_AT` | `TIMESTAMP` | No | Metadata object creation timestamp. |
 | `UPDATED_AT` | `TIMESTAMP` | No | Most recent metadata object update timestamp. |

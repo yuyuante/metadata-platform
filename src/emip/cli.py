@@ -43,6 +43,7 @@ def run_scan(
     objects = []
     failures = []
     files_supported = 0
+    multiple_object_files: list[tuple[Path, int]] = []
     for path in paths:
         result = parser_scanner.scan_file_with_report(path, folder)
         if result.supported:
@@ -51,6 +52,9 @@ def run_scan(
             print(f"Parse failed: {path}")
             failures.append(result.failure)
             continue
+        object_count = len(result.objects)
+        if object_count > 1:
+            multiple_object_files.append((path, object_count))
         objects.extend(result.objects)
 
     print("Saving...")
@@ -77,6 +81,12 @@ def run_scan(
     print(f"Objects created  : {persistence_result.objects_created}")
     print(f"Objects skipped  : {persistence_result.objects_skipped}")
     print(f"Objects failed   : {persistence_result.objects_failed}")
+    print("Files with multiple objects:")
+    if multiple_object_files:
+        for path, object_count in multiple_object_files:
+            print(f"  {path} : {object_count} objects")
+    else:
+        print("  None")
     print(f"Report written to: {report_path}")
     print()
     print("Success.")

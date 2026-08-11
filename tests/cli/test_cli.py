@@ -48,3 +48,29 @@ def test_run_scan_returns_one_for_missing_folder(
 
     assert exit_code == 1
     assert "Folder not found:" in capsys.readouterr().out  # type: ignore[attr-defined]
+
+
+def test_run_scan_lists_files_with_multiple_objects(
+    tmp_path: Path, capsys: object
+) -> None:
+    sql_path = tmp_path / "multi.sql"
+    sql_path.write_text(
+        "CREATE TABLE sales.customer (id INT); "
+        "CREATE VIEW sales.customer_view AS SELECT 1;",
+        encoding="utf-8",
+    )
+    persister = InMemoryPersister()
+
+    exit_code = run_scan(
+        tmp_path,
+        scanner=FolderScanner(),
+        metadata_scanner=FolderMetadataScanner(),
+        persister=cast(MetadataObjectPersister, persister),
+        report_dir=tmp_path / "scan-report",
+    )
+
+    output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert len(persister.objects) == 2
+    assert "Files with multiple objects:" in output
+    assert f"{sql_path} : 2 objects" in output

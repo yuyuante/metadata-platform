@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from emip.domain import ObjectType
-from emip.parser.sql_ddl_parser import SqlDdlParser
+from emip.parser.sql_ddl_parser import SqlDdlParser, UnsupportedSqlSyntaxError
 
 
 def _parse(tmp_path: Path, sql: str):
@@ -18,6 +20,53 @@ def test_parse_create_table(tmp_path: Path) -> None:
     assert objects[0].system_name == "warehouse"
     assert objects[0].qualified_name == "sales.customer"
     assert objects[0].name == "customer"
+
+
+def test_parse_malformed_greenplum_table_raises(tmp_path: Path) -> None:
+    sql = "CREATE TABLE sales.customer (id INT) NOT NULL) DISTRIBUTED BY (id);"
+
+    with pytest.raises(UnsupportedSqlSyntaxError):
+        _parse(tmp_path, sql)
+
+
+def test_parse_greenplum_distributed_table(tmp_path: Path) -> None:
+    sql = """
+    CREATE TABLE sales.customer (id INT)
+    DISTRIBUTED BY (id);
+    """
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TABLE
+    assert objects[0].qualified_name == "sales.customer"
+
+
+def test_parse_greenplum_randomly_distributed_table(tmp_path: Path) -> None:
+    sql = "CREATE TABLE sales.customer (id INT) DISTRIBUTED RANDOMLY;"
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TABLE
+
+
+def test_parse_greenplum_replicated_table(tmp_path: Path) -> None:
+    sql = "CREATE TABLE sales.customer (id INT) DISTRIBUTED REPLICATED;"
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TABLE
+
+
+def test_parse_greenplum_distribute_typo_used_in_source_table(tmp_path: Path) -> None:
+    sql = "CREATE TABLE sales.customer (id INT) DISTRIBUTE BY (id);"
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.TABLE
 
 
 def test_parse_create_view(tmp_path: Path) -> None:
@@ -39,6 +88,24 @@ def test_parse_create_procedure(tmp_path: Path) -> None:
 
     assert objects[0].object_type is ObjectType.PROCEDURE
     assert objects[0].qualified_name == "public.refresh_data"
+
+
+def test_parse_command_style_create_function(tmp_path: Path) -> None:
+    sql = """
+    CREATE OR REPLACE FUNCTION DB_OWNER.proc_update()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.FUNCTION
+    assert objects[0].qualified_name == "DB_OWNER.proc_update"
+    assert objects[0].name == "proc_update"
 
 
 def test_parse_create_trigger(tmp_path: Path) -> None:
