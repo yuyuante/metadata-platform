@@ -52,3 +52,9 @@ def test_folder_scanner_parses_create_after_drop(tmp_path: Path) -> None:
     assert objects[0].object_type is ObjectType.TABLE
     assert objects[0].qualified_name == "sales.customer"
     assert objects[0].system_name == "customer"
+
+
+def test_splitter_ignores_psql_meta_commands() -> None:
+    script = "\\echo 'create table'\nCREATE TABLE sales.customer (id INT);"
+
+    assert ScriptSplitter().split(script) == ["CREATE TABLE sales.customer (id INT);"]
