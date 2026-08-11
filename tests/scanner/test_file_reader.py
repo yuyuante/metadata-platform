@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from emip.scanner.file_reader import EncodingReadError, FileReader
+from emip.scanner.file_reader import (
+    EncodingReadError,
+    FileReader,
+    UnsupportedInputError,
+)
 
 
 def test_reader_strips_utf8_bom(tmp_path: Path) -> None:
@@ -28,4 +32,12 @@ def test_reader_raises_after_all_encodings_fail(
     monkeypatch.setattr(Path, "read_bytes", lambda _path: b"\xff\xfe\xff")
 
     with pytest.raises(EncodingReadError, match="utf-8-sig"):
+        FileReader().read(path)
+
+
+def test_reader_rejects_postgres_custom_dump(tmp_path: Path) -> None:
+    path = tmp_path / "dump.sql"
+    path.write_bytes(b"PGDMP\x01\x0d\x00binary")
+
+    with pytest.raises(UnsupportedInputError, match="PG custom-format dump"):
         FileReader().read(path)

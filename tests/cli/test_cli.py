@@ -67,6 +67,29 @@ def test_run_scan_lists_multiple_functions_in_one_file(
     assert f"{sql_path} : 2 objects" in output
 
 
+def test_run_scan_reports_postgres_custom_dump_as_unsupported(
+    tmp_path: Path, capsys: object
+) -> None:
+    dump_path = tmp_path / "satay_dump.sql"
+    dump_path.write_bytes(b"PGDMP\x01\x0d\x00binary")
+    persister = InMemoryPersister()
+
+    exit_code = run_scan(
+        tmp_path,
+        scanner=FolderScanner(),
+        metadata_scanner=FolderMetadataScanner(),
+        persister=cast(MetadataObjectPersister, persister),
+        report_dir=tmp_path / "scan-report",
+    )
+
+    output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert not persister.objects
+    assert "Files unsupported: 1" in output
+    assert "Unsupported reason: PG custom-format dump" in output
+    assert "Files failed     : 0" in output
+
+
 def test_run_scan_returns_one_for_missing_folder(
     tmp_path: Path, capsys: object
 ) -> None:

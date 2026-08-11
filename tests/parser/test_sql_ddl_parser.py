@@ -100,10 +100,39 @@ def test_parse_create_function(tmp_path: Path) -> None:
 
 
 def test_parse_create_procedure(tmp_path: Path) -> None:
-    objects = _parse(tmp_path, "CREATE PROCEDURE public.refresh_data();")
+    sql = "CREATE PROCEDURE public.refresh_data();"
+    objects = _parse(tmp_path, sql)
 
     assert objects[0].object_type is ObjectType.PROCEDURE
     assert objects[0].qualified_name == "public.refresh_data"
+    assert objects[0].description == sql
+
+
+def test_parse_create_or_replace_procedure(tmp_path: Path) -> None:
+    sql = "CREATE OR REPLACE PROCEDURE public.refresh_data() AS $$ BEGIN NULL; END; $$;"
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.PROCEDURE
+    assert objects[0].name == "refresh_data"
+    assert objects[0].description == sql
+
+
+def test_parse_procedure_with_greenplum_options(tmp_path: Path) -> None:
+    sql = """
+    CREATE OR REPLACE PROCEDURE DB_OWNER.refresh_data()
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = DB_OWNER
+    AS $$ BEGIN NULL; END; $$;
+    """
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.PROCEDURE
+    assert objects[0].qualified_name == "DB_OWNER.refresh_data"
+    assert "SECURITY DEFINER" in (objects[0].description or "")
+    assert "SET search_path" in (objects[0].description or "")
 
 
 def test_parse_command_style_create_function(tmp_path: Path) -> None:

@@ -3,6 +3,17 @@
 from pathlib import Path
 
 _ENCODINGS = ("utf-8-sig", "utf-8", "cp950", "big5")
+_PG_CUSTOM_DUMP_MAGIC = b"PGDMP"
+
+
+class UnsupportedInputError(ValueError):
+    """Raised when an input is not a text SQL script."""
+
+    reason = "PG custom-format dump"
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(f"Unsupported input: {self.reason}: {path}")
 
 
 class EncodingReadError(UnicodeError):
@@ -25,6 +36,8 @@ class FileReader:
         """Read ``path`` using the required ordered encoding fallbacks."""
 
         content = path.read_bytes()
+        if content.startswith(_PG_CUSTOM_DUMP_MAGIC):
+            raise UnsupportedInputError(path)
         errors: list[UnicodeDecodeError] = []
         for encoding in _ENCODINGS:
             try:

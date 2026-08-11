@@ -35,6 +35,8 @@ class SqlDdlParser:
         source = path.read_text(encoding="utf-8")
         if _is_create_function(source):
             return [_function_object(path, source)]
+        if _is_create_procedure(source):
+            return [_procedure_object(path, source)]
         statements = sqlglot.parse(source, read="postgres")
         if any(isinstance(statement, exp.Command) for statement in statements):
             compatible_source = _remove_greenplum_distribution(source)
@@ -99,6 +101,61 @@ def _function_metadata_statement(source: str) -> str:
 
     _, qualified_name = _function_names(source)
     return f"CREATE FUNCTION {qualified_name}() RETURNS TEXT AS 'metadata';"
+
+
+def _procedure_object(path: Path, source: str) -> MetadataObject:
+    """Create procedure metadata without parsing the procedure body."""
+
+    metadata_statement = _procedure_metadata_statement(source)
+    statements = sqlglot.parse(metadata_statement, read="postgres")
+    statement = statements[0]
+    if not isinstance(statement, exp.Create):
+        raise UnsupportedSqlSyntaxError(
+            "SQLGlot did not produce a CREATE AST for a procedure."
+        )
+    name, qualified_name = _object_names(statement)
+    return MetadataObject.create(
+        object_type=ObjectType.PROCEDURE,
+        system_name=path.stem,
+        qualified_name=qualified_name,
+        name=name,
+        description=source,
+    )
+
+
+def _procedure_metadata_statement(source: str) -> str:
+    """Build a minimal CREATE PROCEDURE statement for metadata extraction."""
+
+    _, qualified_name = _procedure_names(source)
+    return f"CREATE PROCEDURE {qualified_name}();"
+
+
+def _is_create_procedure(source: str) -> bool:
+    """Return whether the source is a CREATE PROCEDURE statement."""
+
+    return (
+        re.match(
+            r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\b",
+            source,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _procedure_names(source: str) -> tuple[str, str]:
+    """Extract names from a CREATE PROCEDURE statement."""
+
+    match = re.match(
+        r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+([^\s(]+)",
+        source,
+        re.IGNORECASE,
+    )
+    if match is None:
+        raise UnsupportedSqlSyntaxError("Unable to identify CREATE PROCEDURE name.")
+    qualified_name = match.group(1).strip('"')
+    name = qualified_name.rsplit(".", 1)[-1].strip('"')
+    return name, qualified_name
 
 
 def _is_create_function(source: str) -> bool:

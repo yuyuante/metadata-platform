@@ -45,6 +45,15 @@ def test_scan_includes_chinese_filename(tmp_path: Path) -> None:
     assert FolderScanner().scan(tmp_path) == [chinese_file.resolve()]
 
 
+def test_scan_ignores_testsuite_files(tmp_path: Path) -> None:
+    ddl = tmp_path / "deployment.sql"
+    test_suite = tmp_path / "deployment.TestSuite.sql"
+    ddl.write_text("CREATE TABLE sample (id INT);", encoding="utf-8")
+    test_suite.write_text("CREATE TABLE test_only (id INT);", encoding="utf-8")
+
+    assert FolderScanner().scan(tmp_path) == [ddl.resolve()]
+
+
 def test_scan_returns_deterministic_ordering(tmp_path: Path) -> None:
     paths = [tmp_path / name for name in ("z.txt", "a.txt", "m.txt")]
     for path in paths:
