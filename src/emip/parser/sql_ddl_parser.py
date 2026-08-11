@@ -33,6 +33,8 @@ class SqlDdlParser:
         """Parse supported CREATE statements from a SQL file."""
 
         source = path.read_text(encoding="utf-8")
+        if _is_create_function(source):
+            return [_function_object(path, source)]
         statements = sqlglot.parse(source, read="postgres")
         if any(isinstance(statement, exp.Command) for statement in statements):
             compatible_source = _remove_greenplum_distribution(source)
@@ -44,18 +46,6 @@ class SqlDdlParser:
                 raise UnsupportedSqlSyntaxError(
                     "Unsupported CREATE TABLE syntax: SQLGlot returned Command."
                 )
-            if _is_create_function(source) and any(
-                isinstance(statement, exp.Command) for statement in statements
-            ):
-                name, qualified_name = _function_names(source)
-                return [
-                    MetadataObject.create(
-                        object_type=ObjectType.FUNCTION,
-                        system_name=path.stem,
-                        qualified_name=qualified_name,
-                        name=name,
-                    )
-                ]
         objects: list[MetadataObject] = []
         system_name = path.stem
 
@@ -74,10 +64,41 @@ class SqlDdlParser:
                     system_name=system_name,
                     qualified_name=qualified_name,
                     name=name,
-                    description=source if object_type is ObjectType.VIEW else None,
+                    description=(
+                        source
+                        if object_type in {ObjectType.VIEW, ObjectType.FUNCTION}
+                        else None
+                    ),
                 )
             )
         return objects
+
+
+def _function_object(path: Path, source: str) -> MetadataObject:
+    """Create function metadata without parsing the function body."""
+
+    metadata_statement = _function_metadata_statement(source)
+    statements = sqlglot.parse(metadata_statement, read="postgres")
+    statement = statements[0]
+    if not isinstance(statement, exp.Create):
+        raise UnsupportedSqlSyntaxError(
+            "SQLGlot did not produce a CREATE AST for a function."
+        )
+    name, qualified_name = _object_names(statement)
+    return MetadataObject.create(
+        object_type=ObjectType.FUNCTION,
+        system_name=path.stem,
+        qualified_name=qualified_name,
+        name=name,
+        description=source,
+    )
+
+
+def _function_metadata_statement(source: str) -> str:
+    """Build a minimal CREATE FUNCTION statement for metadata extraction."""
+
+    _, qualified_name = _function_names(source)
+    return f"CREATE FUNCTION {qualified_name}() RETURNS TEXT AS 'metadata';"
 
 
 def _is_create_function(source: str) -> bool:

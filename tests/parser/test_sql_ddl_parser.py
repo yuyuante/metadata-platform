@@ -94,6 +94,9 @@ def test_parse_create_function(tmp_path: Path) -> None:
 
     assert objects[0].object_type is ObjectType.FUNCTION
     assert objects[0].name == "refresh_data"
+    assert objects[0].description == (
+        "CREATE FUNCTION public.refresh_data() RETURNS INT;"
+    )
 
 
 def test_parse_create_procedure(tmp_path: Path) -> None:
@@ -119,6 +122,40 @@ def test_parse_command_style_create_function(tmp_path: Path) -> None:
     assert objects[0].object_type is ObjectType.FUNCTION
     assert objects[0].qualified_name == "DB_OWNER.proc_update"
     assert objects[0].name == "proc_update"
+    assert objects[0].description == sql
+
+
+def test_parse_function_preserves_language_and_return_type(tmp_path: Path) -> None:
+    sql = """
+    CREATE OR REPLACE FUNCTION public.calculate_total(amount NUMERIC)
+    RETURNS TABLE (total NUMERIC)
+    LANGUAGE SQL
+    AS $$ SELECT amount $$;
+    """
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.FUNCTION
+    assert objects[0].qualified_name == "public.calculate_total"
+    assert "RETURNS TABLE (total NUMERIC)" in (objects[0].description or "")
+    assert "LANGUAGE SQL" in (objects[0].description or "")
+
+
+def test_parse_function_with_return_type_and_language(tmp_path: Path) -> None:
+    sql = """
+    CREATE FUNCTION public.is_valid(value TEXT)
+    RETURNS BOOLEAN
+    AS $$ SELECT value IS NOT NULL $$
+    LANGUAGE plpgsql;
+    """
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.FUNCTION
+    assert "RETURNS BOOLEAN" in (objects[0].description or "")
+    assert "LANGUAGE plpgsql" in (objects[0].description or "")
 
 
 def test_parse_create_trigger(tmp_path: Path) -> None:

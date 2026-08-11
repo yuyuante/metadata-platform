@@ -41,6 +41,32 @@ def test_run_scan_persists_objects_and_prints_summary(
     assert "Files scanned    : 1" in capsys.readouterr().out  # type: ignore[attr-defined]
 
 
+def test_run_scan_lists_multiple_functions_in_one_file(
+    tmp_path: Path, capsys: object
+) -> None:
+    sql_path = tmp_path / "functions.sql"
+    sql_path.write_text(
+        "CREATE FUNCTION public.first_function() RETURNS INT; "
+        "CREATE OR REPLACE FUNCTION public.second_function() RETURNS TEXT;",
+        encoding="utf-8",
+    )
+    persister = InMemoryPersister()
+
+    exit_code = run_scan(
+        tmp_path,
+        scanner=FolderScanner(),
+        metadata_scanner=FolderMetadataScanner(),
+        persister=cast(MetadataObjectPersister, persister),
+        report_dir=tmp_path / "scan-report",
+    )
+
+    output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert len(persister.objects) == 2
+    assert "Files with multiple objects:" in output
+    assert f"{sql_path} : 2 objects" in output
+
+
 def test_run_scan_returns_one_for_missing_folder(
     tmp_path: Path, capsys: object
 ) -> None:
