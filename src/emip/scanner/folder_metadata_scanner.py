@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import cast
 
 from emip.domain import MetadataObject
+from emip.parser.informatica.xml_parser import InformaticaMetadataParser
 from emip.parser.parser_dispatcher import ParserDispatcher
 from emip.parser.script_splitter import ScriptSplitter
 from emip.parser.sql_ddl_parser import SqlDdlParser
@@ -120,7 +121,9 @@ class FolderMetadataScanner:
             objects.extend(self.scan_file(path))
         return objects
 
-    def _parse_file(self, path: Path, parser: SqlDdlParser) -> list[MetadataObject]:
+    def _parse_file(
+        self, path: Path, parser: SqlDdlParser | InformaticaMetadataParser
+    ) -> list[MetadataObject]:
         """Split and filter SQL before invoking the unchanged parser."""
 
         if path.suffix.lower() != ".sql":

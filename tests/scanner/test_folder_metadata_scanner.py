@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from emip.domain import ObjectType
+from emip.parser.informatica.xml_parser import InformaticaMetadataParser
 from emip.parser.parser_dispatcher import ParserDispatcher
 from emip.parser.sql_ddl_parser import SqlDdlParser
 from emip.scanner.folder_metadata_scanner import FolderMetadataScanner
@@ -13,7 +14,9 @@ def test_get_parser_returns_sql_ddl_parser() -> None:
 
 
 def test_get_parser_returns_none_for_unsupported_file() -> None:
-    assert ParserDispatcher().get_parser(Path("workflow.xml")) is None
+    assert isinstance(
+        ParserDispatcher().get_parser(Path("workflow.xml")), InformaticaMetadataParser
+    )
     assert ParserDispatcher().get_parser(Path("python.py")) is None
 
 
@@ -26,7 +29,7 @@ def test_scan_collects_metadata_objects_without_database_access(tmp_path: Path) 
             f"CREATE TABLE sales.{object_name} (id INT);",
             encoding="utf-8",
         )
-    (samples / "workflow.xml").write_text("<workflow />", encoding="utf-8")
+    (samples / "workflow.txt").write_text("unsupported", encoding="utf-8")
 
     objects = FolderMetadataScanner().scan(tmp_path / "samples")
 
