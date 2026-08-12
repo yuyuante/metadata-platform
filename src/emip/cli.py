@@ -46,6 +46,7 @@ def run_scan(
     files_unsupported = 0
     unsupported_reasons: list[str] = []
     multiple_object_files: list[tuple[Path, int]] = []
+    dynamic_sql_files: list[tuple[Path, dict[str, int]]] = []
     for path in paths:
         result = parser_scanner.scan_file_with_report(path, folder)
         if result.unsupported_reason is not None:
@@ -63,6 +64,17 @@ def run_scan(
         object_count = len(result.objects)
         if object_count > 1:
             multiple_object_files.append((path, object_count))
+        dynamic_statuses: dict[str, int] = {}
+        for metadata_object in result.objects:
+            for property_item in metadata_object.properties:
+                if property_item.property_name != "dynamic_sql_status":
+                    continue
+                status = property_item.property_value
+                if status is None:
+                    continue
+                dynamic_statuses[status] = dynamic_statuses.get(status, 0) + 1
+        if dynamic_statuses:
+            dynamic_sql_files.append((path, dynamic_statuses))
         objects.extend(result.objects)
 
     print("Saving...")
@@ -96,6 +108,15 @@ def run_scan(
     if multiple_object_files:
         for path, object_count in multiple_object_files:
             print(f"  {path} : {object_count} objects")
+    else:
+        print("  None")
+    print("Files with dynamic SQL:")
+    if dynamic_sql_files:
+        for path, statuses in dynamic_sql_files:
+            details = ", ".join(
+                f"{status}: {count}" for status, count in sorted(statuses.items())
+            )
+            print(f"  {path} : {details} objects")
     else:
         print("  None")
     print(f"Report written to: {report_path}")
