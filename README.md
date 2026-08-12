@@ -105,6 +105,22 @@ python -m emip scan samples/sql
 The command scans files, parses supported SQL DDL, and persists generated metadata objects into Greenplum.
 此命令會掃描檔案、解析支援的 SQL DDL，並將產生的中繼資料物件保存至 Greenplum。
 
+## Production Scan / 生產掃描
+
+Use the unified batch entry point from the project root:
+請從專案根目錄使用統一批次入口：
+
+```powershell
+scripts\scan.bat sql
+scripts\scan.bat workflow
+scripts\scan.bat all
+scripts\scan.bat perf
+scripts\scan.bat clean
+```
+
+The script continues after an individual repository failure, prints each result and a final summary, and returns a non-zero exit code when any scan fails. Missing repositories are reported as skipped. Database settings continue to come from the existing project configuration; credentials are not stored in the batch file.
+批次檔會在單一 repository 失敗後繼續執行，列出每次結果與最終摘要；任一掃描失敗時回傳非零結束碼。不存在的 repository 會列為略過。資料庫設定仍沿用專案既有設定，批次檔不保存憑證。
+
 ## Running Tests / 執行測試
 
 ```powershell
