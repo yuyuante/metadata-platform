@@ -15,6 +15,7 @@ from emip.domain import (
     RelationCandidate,
     RelationType,
 )
+from emip.parser.dynamic_sql_resolver import DynamicSqlResolver
 
 _SUPPORTED_TYPES: dict[str, ObjectType] = {
     "TABLE": ObjectType.TABLE,
@@ -107,37 +108,8 @@ class SqlDdlParser:
 
 _IDENTIFIER = r"(?:\[[^]]+\]|" + r'"[^" ]+"' + r"|[A-Za-z_#][\w$#@]*)"
 _REF = rf"({_IDENTIFIER}(?:\s*\.\s*{_IDENTIFIER}){{0,2}})"
-_DYNAMIC = re.compile(
-    r"\b(?:EXEC(?:UTE)?\s*\(|EXECUTE\s+IMMEDIATE\b|EXECUTE\s+['\"]|sp_executesql\b|\bEXECUTE\s+[^'\"\s]+\s*\+)",
-    re.I,
-)
-_LITERAL_EXEC = re.compile(
-    r"\b(?:EXEC|EXECUTE)\s*\(\s*(['\"])(.*?)\1\s*\)", re.I | re.S
-)
-_LITERAL_EXECUTE = re.compile(r"\bEXECUTE\s+(['\"])(.*?)\1\s*;?", re.I | re.S)
-_CONSTANT_ASSIGNMENT = re.compile(
-    r"\b(?:DECLARE\s+)?@([A-Za-z_][\w$]*)\b(?:\s+[^=;]+)?\s*=\s*(['\"])(.*?)\2\s*;",
-    re.I | re.S,
-)
+_DYNAMIC_SQL_RESOLVER = DynamicSqlResolver()
 _TRIGGER_UPDATE_OF = re.compile(r"\bUPDATE\s+OF\s+(.+?)\s+ON\b", re.I | re.S)
-
-
-def _resolve_dynamic_sql(source: str) -> str | None:
-    """Return dynamic SQL only when its complete text is a constant literal."""
-
-    literal = _LITERAL_EXEC.search(source) or _LITERAL_EXECUTE.search(source)
-    if literal is not None:
-        return literal.group(2)
-    assignments = {
-        match.group(1).lower(): match.group(3)
-        for match in _CONSTANT_ASSIGNMENT.finditer(source)
-    }
-    variable_exec = re.search(
-        r"\bEXEC(?:UTE)?\s*\(\s*@([A-Za-z_][\w$]*)\s*\)", source, re.I
-    )
-    if variable_exec is not None:
-        return assignments.get(variable_exec.group(1).lower())
-    return None
 
 
 def _clean_ref(value: str) -> str:
@@ -148,8 +120,9 @@ def _with_relationships(
     objects: list[MetadataObject], source: str
 ) -> list[MetadataObject]:
     """Attach conservative, evidence-backed relation candidates to parsed objects."""
-    dynamic = _DYNAMIC.search(source) is not None
-    resolved_sql = _resolve_dynamic_sql(source)
+    resolution = _DYNAMIC_SQL_RESOLVER.resolve(source)
+    dynamic = resolution.contains_dynamic_sql
+    resolved_sql = resolution.resolved_sql
     relation_sql = source
     source_type = "STATIC_SQL"
     if dynamic and resolved_sql is not None:
