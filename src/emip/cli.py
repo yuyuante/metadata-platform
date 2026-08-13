@@ -1,6 +1,7 @@
 """Command-line entry point for EMIP."""
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def run_scan(
         return 1
 
     started_at = time.perf_counter()
+    output_dir = report_dir if report_dir is not None else Path("scan-report")
     profiler = Profiler() if profile else None
     file_scanner = scanner if scanner is not None else FolderScanner()
     parser_scanner = (
@@ -108,19 +110,38 @@ def run_scan(
         files_failed=len(failures),
         objects_created=persistence_result.objects_created,
         elapsed_seconds=elapsed_seconds,
+        objects_skipped=persistence_result.objects_skipped,
+        objects_failed=persistence_result.objects_failed,
     )
     report_started_at = time.perf_counter()
-    report_path = ScanReportWriter().write(
-        summary,
-        failures,
-        output_dir=report_dir if report_dir is not None else Path("scan-report"),
+    report_path = ScanReportWriter().write(summary, failures, output_dir=output_dir)
+    repository_failure_path = output_dir / "repository-failures.json"
+    repository_failure_path.write_text(
+        json.dumps(
+            {
+                "objects_created": persistence_result.objects_created,
+                "objects_skipped": persistence_result.objects_skipped,
+                "objects_failed": persistence_result.objects_failed,
+                "failure_categories": persistence_result.failure_categories,
+                "failures": [
+                    {
+                        "category": item.category,
+                        "object_type": item.object_type,
+                        "qualified_name": item.qualified_name,
+                        "error_type": item.error_type,
+                        "error_message": item.error_message,
+                    }
+                    for item in persistence_result.failures
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
     )
     if profiler is not None:
         profiler.record("Report generation", time.perf_counter() - report_started_at)
         profiler.record("Total execution", time.perf_counter() - profiler.started_at)
-        performance_path = (
-            report_dir if report_dir is not None else Path("scan-report")
-        ) / "performance-report.txt"
+        performance_path = output_dir / "performance-report.txt"
         profiler.write(performance_path)
         print(performance_path.read_text(encoding="utf-8"))
 
@@ -135,6 +156,16 @@ def run_scan(
     print(f"Objects created  : {persistence_result.objects_created}")
     print(f"Objects skipped  : {persistence_result.objects_skipped}")
     print(f"Objects failed   : {persistence_result.objects_failed}")
+    print("Repository failure classification:")
+    if persistence_result.failure_categories:
+        for category, count in sorted(
+            persistence_result.failure_categories.items(),
+            key=lambda item: (-item[1], item[0]),
+        ):
+            print(f"  {category}: {count}")
+    else:
+        print("  None")
+    print(f"Repository failure report: {repository_failure_path}")
     print("Files with multiple objects:")
     if multiple_object_files:
         for path, object_count in multiple_object_files:

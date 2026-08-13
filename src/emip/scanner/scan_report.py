@@ -29,6 +29,8 @@ class ScanSummary:
     files_failed: int
     objects_created: int
     elapsed_seconds: float
+    objects_skipped: int = 0
+    objects_failed: int = 0
 
 
 class ScanReportWriter:
@@ -55,6 +57,8 @@ class ScanReportWriter:
             "files_supported": summary.files_supported,
             "files_failed": summary.files_failed,
             "objects_created": summary.objects_created,
+            "objects_skipped": summary.objects_skipped,
+            "objects_failed": summary.objects_failed,
             "elapsed_seconds": round(summary.elapsed_seconds, 3),
         }
         path.write_text(

@@ -141,6 +141,25 @@ class MetadataRepository:
         self._property_table_identifier = sql.Identifier(
             *(part.lower() for part in qualified_property_table.split("."))
         )
+        self._column_table_available = self._has_table(self._column_table_identifier)
+
+    @property
+    def column_table_available(self) -> bool:
+        """Whether the optional column table is available for persistence."""
+
+        return self._column_table_available
+
+    def _has_table(self, table_identifier: sql.Composable) -> bool:
+        """Check optional metadata tables without making a transaction fail."""
+
+        query = sql.SQL("SELECT 1 FROM {} LIMIT 0").format(table_identifier)
+        try:
+            with self._connection.cursor() as cursor:
+                cursor.execute(query)
+        except psycopg2.errors.UndefinedTable:
+            self._connection.rollback()
+            return False
+        return True
 
     def _observe(self, event: str, amount: int = 1) -> None:
         if self._observer is not None:
@@ -171,7 +190,10 @@ class MetadataRepository:
                 cursor.execute(query, values)
                 row = cursor.fetchone()
                 self._observe("insert")
-                self._insert_columns(cursor, metadata_object.columns)
+                if self._column_table_available:
+                    self._insert_columns(
+                        cursor, metadata_object.object_id, metadata_object.columns
+                    )
                 self._insert_properties(
                     cursor, metadata_object.object_id, metadata_object.properties
                 )
@@ -248,7 +270,11 @@ class MetadataRepository:
             with self._connection.cursor() as cursor:
                 cursor.execute(query, values)
                 row = cursor.fetchone()
-                if row is not None and metadata_object.columns:
+                if (
+                    row is not None
+                    and metadata_object.columns
+                    and self._column_table_available
+                ):
                     self._replace_columns(
                         cursor,
                         metadata_object.object_id,
@@ -269,7 +295,12 @@ class MetadataRepository:
         updated_object.properties = self._load_properties(updated_object.object_id)
         return updated_object
 
-    def _insert_columns(self, cursor: Any, columns: tuple[Column, ...]) -> None:
+    def _insert_columns(
+        self,
+        cursor: Any,
+        object_id: UUID,
+        columns: tuple[Column, ...],
+    ) -> None:
         """Insert column metadata in the current object transaction."""
 
         if not columns:
@@ -282,7 +313,7 @@ class MetadataRepository:
             [
                 (
                     str(column.column_id),
-                    str(column.object_id),
+                    str(object_id),
                     column.column_name,
                     column.ordinal_position,
                     column.datatype,
@@ -357,7 +388,7 @@ class MetadataRepository:
             ),
             (str(object_id),),
         )
-        self._insert_columns(cursor, columns)
+        self._insert_columns(cursor, object_id, columns)
 
     def _load_columns(self, object_id: UUID) -> tuple[Column, ...]:
         """Load columns while remaining compatible with pre-migration databases."""

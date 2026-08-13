@@ -4,6 +4,7 @@ from emip.domain import MetadataObject, ObjectType
 from emip.repository.metadata_persister import (
     MetadataObjectPersister,
     PersistenceResult,
+    classify_persistence_failure,
 )
 from emip.repository.metadata_repository import MetadataRepository
 
@@ -72,7 +73,11 @@ def test_persist_counts_failed_object_and_continues() -> None:
     result = _persister(repository).persist([_object("customer"), _object("order")])
 
     assert result == PersistenceResult(
-        objects_created=1, objects_skipped=0, objects_failed=1
+        objects_created=1,
+        objects_skipped=0,
+        objects_failed=1,
+        failure_categories={"Unexpected Exception": 1},
+        failures=(result.failures[0],),
     )
     assert [item.name for item in repository.objects] == ["order"]
 
@@ -100,3 +105,15 @@ def test_persist_reports_current_object_and_result() -> None:
     assert any("Saving [1/2] saved; created=1" in item for item in progress)
     assert "Saving [2/2] sales.order" in progress
     assert progress[-1].endswith("created=2, skipped=0, failed=0")
+
+
+def test_classifies_foreign_key_failure() -> None:
+    error = type("ForeignKeyViolation", (Exception,), {})("column parent missing")
+
+    assert classify_persistence_failure(error, "object") == "Foreign Key"
+
+
+def test_classifies_duplicate_relation() -> None:
+    error = type("UniqueViolation", (Exception,), {})("relation exists")
+
+    assert classify_persistence_failure(error, "relation") == "Duplicate Relation"
