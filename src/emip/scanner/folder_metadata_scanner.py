@@ -2,7 +2,8 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from time import perf_counter
+from typing import Any, cast
 
 from emip.domain import MetadataObject
 from emip.parser.informatica.xml_parser import InformaticaMetadataParser
@@ -50,12 +51,14 @@ class FolderMetadataScanner:
         self,
         scanner: FolderScanner | None = None,
         dispatcher: ParserDispatcher | None = None,
+        profiler: Any | None = None,
     ) -> None:
         self._scanner = scanner if scanner is not None else FolderScanner()
         self._dispatcher = dispatcher if dispatcher is not None else ParserDispatcher()
         self._splitter = ScriptSplitter()
         self._filter = StatementFilter()
-        self._reader = FileReader()
+        self._profiler = profiler
+        self._reader = FileReader(profiler)
 
     def scan_file(self, path: Path) -> list[MetadataObject]:
         """Return metadata objects parsed from one supported file."""
@@ -127,14 +130,33 @@ class FolderMetadataScanner:
         """Split and filter SQL before invoking the unchanged parser."""
 
         if path.suffix.lower() != ".sql":
-            return parser.parse(path)
+            started_at = perf_counter()
+            parsed_xml_objects = parser.parse(path)
+            if self._profiler is not None:
+                self._profiler.record(
+                    "XML parsing", perf_counter() - started_at, len(parsed_xml_objects)
+                )
+            return parsed_xml_objects
 
         script = self._reader.read(path)
+        filtering_started_at = perf_counter()
         statements = self._filter.filter(self._splitter.split(script))
+        if self._profiler is not None:
+            self._profiler.record(
+                "File filtering", perf_counter() - filtering_started_at
+            )
         objects: list[MetadataObject] = []
         for statement in statements:
             source = _StatementSource(path, statement)
-            objects.extend(parser.parse(cast(Path, source)))
+            parsing_started_at = perf_counter()
+            parsed_objects = parser.parse(cast(Path, source))
+            if self._profiler is not None:
+                self._profiler.record(
+                    "SQL parsing",
+                    perf_counter() - parsing_started_at,
+                    len(parsed_objects),
+                )
+            objects.extend(parsed_objects)
         return objects
 
 

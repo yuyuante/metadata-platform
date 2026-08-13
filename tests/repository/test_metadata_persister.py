@@ -83,3 +83,20 @@ def test_persist_empty_objects_returns_zero() -> None:
     assert result == PersistenceResult(
         objects_created=0, objects_skipped=0, objects_failed=0
     )
+
+
+def test_persist_reports_current_object_and_result() -> None:
+    repository = InMemoryMetadataRepository()
+    progress: list[str] = []
+
+    result = MetadataObjectPersister(
+        repository=cast(MetadataRepository, repository),
+        progress_callback=progress.append,
+    ).persist([_object("customer"), _object("order")])
+
+    assert result.objects_created == 2
+    assert progress[0] == "Saving started: 2 objects"
+    assert "Saving [1/2] sales.customer" in progress
+    assert any("Saving [1/2] saved; created=1" in item for item in progress)
+    assert "Saving [2/2] sales.order" in progress
+    assert progress[-1].endswith("created=2, skipped=0, failed=0")

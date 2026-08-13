@@ -1,5 +1,6 @@
 """Greenplum repository for canonical metadata objects."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -108,7 +109,8 @@ def _row_to_metadata_object(row: tuple[Any, ...]) -> MetadataObject:
 class MetadataRepository:
     """Persist MetadataObject instances in Greenplum."""
 
-    def __init__(self) -> None:
+    def __init__(self, observer: Callable[[str, int], None] | None = None) -> None:
+        self._observer = observer
         self._database = DatabaseConnection()
         self._connection = self._database.connect()
         settings = self._database.settings
@@ -140,6 +142,10 @@ class MetadataRepository:
             *(part.lower() for part in qualified_property_table.split("."))
         )
 
+    def _observe(self, event: str, amount: int = 1) -> None:
+        if self._observer is not None:
+            self._observer(event, amount)
+
     def create_object(self, metadata_object: MetadataObject) -> MetadataObject:
         """Insert and return a MetadataObject."""
 
@@ -164,11 +170,14 @@ class MetadataRepository:
             with self._connection.cursor() as cursor:
                 cursor.execute(query, values)
                 row = cursor.fetchone()
+                self._observe("insert")
                 self._insert_columns(cursor, metadata_object.columns)
                 self._insert_properties(
                     cursor, metadata_object.object_id, metadata_object.properties
                 )
             self._connection.commit()
+            self._observe("commit")
+            self._observe("transaction")
         except psycopg2.Error:
             self._connection.rollback()
             raise
@@ -427,7 +436,10 @@ class MetadataRepository:
                             _to_database_timestamp(relation.created_at),
                         ),
                     )
+                    self._observe("insert")
             self._connection.commit()
+            self._observe("commit")
+            self._observe("transaction")
         except psycopg2.Error:
             self._connection.rollback()
             raise

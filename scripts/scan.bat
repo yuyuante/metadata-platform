@@ -11,6 +11,14 @@ set "SUCCESS_COUNT=0"
 set "FAILED_COUNT=0"
 set "SKIPPED_COUNT=0"
 set "COMMAND=%~1"
+set "PROFILE_FLAG="
+
+if /I "%~2"=="--profile" set "PROFILE_FLAG=--profile"
+if not "%~2"=="" if /I not "%~2"=="--profile" (
+    echo Invalid option: %~2
+    call :usage
+    exit /b 2
+)
 
 if /I "%COMMAND%"=="sql" goto sql
 if /I "%COMMAND%"=="workflow" goto workflow
@@ -72,18 +80,18 @@ set "SCAN_NAME=%~1"
 set "SCAN_ROOT=%~2"
 if not exist "%SCAN_ROOT%\" (
     echo.
-    echo Command: python -m emip scan "%SCAN_ROOT%"
+    echo Command: python -m emip scan "%SCAN_ROOT%" !PROFILE_FLAG!
     echo Result: Skipped - repository not found: %SCAN_ROOT%
     set /a SKIPPED_COUNT+=1
     exit /b 0
 )
 call :timestamp SCAN_START SCAN_START_TICKS
 echo.
-echo Command: python -m emip scan "%SCAN_ROOT%"
+echo Command: python -m emip scan "%SCAN_ROOT%" !PROFILE_FLAG!
 echo Start time: %SCAN_START%
 pushd "%PROJECT_ROOT%"
 set "PYTHONPATH=%PROJECT_ROOT%\src;%PYTHONPATH%"
-python -m emip scan "%SCAN_ROOT%"
+python -m emip scan "%SCAN_ROOT%" !PROFILE_FLAG!
 set "SCAN_RC=!ERRORLEVEL!"
 popd
 call :timestamp SCAN_END SCAN_END_TICKS
@@ -103,18 +111,18 @@ exit /b 0
 set "SCAN_NAME=Performance Investigation"
 if not exist "%WORKFLOW_ROOT%\" (
     echo.
-    echo Command: python scripts\profile_informatica.py "%WORKFLOW_ROOT%"
+    echo Command: python -m emip scan "%WORKFLOW_ROOT%" --profile
     echo Result: Skipped - workflow repository not found: %WORKFLOW_ROOT%
     set /a SKIPPED_COUNT+=1
     exit /b 0
 )
 call :timestamp SCAN_START SCAN_START_TICKS
 echo.
-echo Command: python scripts\profile_informatica.py "%WORKFLOW_ROOT%"
+echo Command: python -m emip scan "%WORKFLOW_ROOT%" --profile
 echo Start time: %SCAN_START%
 pushd "%PROJECT_ROOT%"
 set "PYTHONPATH=%PROJECT_ROOT%\src;%PYTHONPATH%"
-python scripts\profile_informatica.py "%WORKFLOW_ROOT%"
+python -m emip scan "%WORKFLOW_ROOT%" --profile
 set "SCAN_RC=!ERRORLEVEL!"
 popd
 call :timestamp SCAN_END SCAN_END_TICKS
@@ -182,6 +190,15 @@ echo   all       Run SQL first, then Workflow.
 echo   perf      Run the Performance Investigation workflow.
 echo   clean     Remove previous scan reports.
 echo   help      Display this usage information.
+echo.
+echo Optional:
+echo   --profile Record detailed stage timings and write scan-report\performance-report.txt.
+echo.
+echo Examples:
+echo   scan.bat sql --profile
+echo   scan.bat workflow --profile
+echo   scan.bat all --profile
+echo   scan.bat perf
 echo.
 echo Set EMIP_WORKFLOW_ROOT to override the default Informatica repository root.
 exit /b 0

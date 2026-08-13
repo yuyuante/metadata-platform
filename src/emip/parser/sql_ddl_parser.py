@@ -2,6 +2,7 @@
 
 import re
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import sqlglot
@@ -46,23 +47,36 @@ class UnsupportedSqlSyntaxError(ValueError):
 class SqlDdlParser:
     """Parse supported SQL DDL statements into metadata objects."""
 
+    def __init__(self, profiler: Any | None = None) -> None:
+        self._profiler = profiler
+
     def parse(self, path: Path) -> list[MetadataObject]:
         """Parse supported CREATE statements from a SQL file."""
 
         source = path.read_text(encoding="utf-8")
         mssql_objects = _mssql_objects(path, source)
         if mssql_objects is not None:
-            return _with_relationships(mssql_objects, source)
+            objects = _with_relationships(mssql_objects, source)
+            self._record_profile(objects)
+            return objects
         if _is_create_function(source):
-            return _with_relationships([_function_object(path, source)], source)
+            objects = _with_relationships([_function_object(path, source)], source)
+            self._record_profile(objects)
+            return objects
         if _is_create_procedure(source):
-            return _with_relationships([_procedure_object(path, source)], source)
+            objects = _with_relationships([_procedure_object(path, source)], source)
+            self._record_profile(objects)
+            return objects
         if _is_create_trigger(source):
-            return _with_relationships([_trigger_object(path, source)], source)
+            objects = _with_relationships([_trigger_object(path, source)], source)
+            self._record_profile(objects)
+            return objects
         if _is_create_materialized_view(source):
-            return _with_relationships(
+            objects = _with_relationships(
                 [_materialized_view_object(path, source)], source
             )
+            self._record_profile(objects)
+            return objects
         statements = sqlglot.parse(source, read="postgres")
         if any(isinstance(statement, exp.Command) for statement in statements):
             compatible_source = _remove_greenplum_distribution(source)
@@ -74,7 +88,7 @@ class SqlDdlParser:
                 raise UnsupportedSqlSyntaxError(
                     "Unsupported CREATE TABLE syntax: SQLGlot returned Command."
                 )
-        objects: list[MetadataObject] = []
+        parsed_result: list[MetadataObject] = []
         system_name = path.stem
 
         for statement in statements:
@@ -102,8 +116,19 @@ class SqlDdlParser:
                     statement,
                     metadata_object.object_id,
                 )
-            objects.append(metadata_object)
-        return _with_relationships(objects, source)
+            parsed_result.append(metadata_object)
+        parsed_result = _with_relationships(parsed_result, source)
+        self._record_profile(parsed_result)
+        return parsed_result
+
+    def _record_profile(self, objects: list[MetadataObject]) -> None:
+        if self._profiler is None:
+            return
+        relations = sum(len(item.relation_candidates) for item in objects)
+        self._profiler.count("MetadataObject", len(objects))
+        self._profiler.record("MetadataObject creation", 0.0, len(objects))
+        self._profiler.count("Relation", relations)
+        self._profiler.record("Relation extraction", 0.0, relations)
 
 
 _IDENTIFIER = r"(?:\[[^]]+\]|" + r'"[^" ]+"' + r"|[A-Za-z_#][\w$#@]*)"

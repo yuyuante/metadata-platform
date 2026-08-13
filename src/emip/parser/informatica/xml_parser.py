@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from time import perf_counter
+from typing import Any
 
 from emip.domain import (
     Column,
@@ -22,7 +24,11 @@ class InformaticaMetadataParser:
     system_name = "INFORMATICA"
     source_type = "STATIC_INFORMATICA_XML"
 
+    def __init__(self, profiler: Any | None = None) -> None:
+        self._profiler = profiler
+
     def parse(self, path: Path) -> list[MetadataObject]:
+        started_at = perf_counter()
         root = ET.fromstring(_read_xml(path))
         if _name(root) != "POWERMART":
             raise ValueError("Unsupported XML root; expected POWERMART")
@@ -31,6 +37,73 @@ class InformaticaMetadataParser:
             element for element in root.iter() if _name(element) == "FOLDER"
         ):
             objects.extend(self._folder(folder))
+        if self._profiler is not None:
+            self._profiler.record("Namespace processing", 0.0)
+            self._profiler.record(
+                "Workflow extraction",
+                0.0,
+                sum(item.object_type.value == "WORKFLOW" for item in objects),
+            )
+            self._profiler.record(
+                "Task extraction",
+                0.0,
+                sum(
+                    item.object_type.value
+                    in {
+                        "COMMAND",
+                        "SESSION",
+                        "DECISION",
+                        "EVENT_WAIT",
+                        "WORKLET",
+                        "EMAIL",
+                        "TIMER",
+                        "START_TASK",
+                    }
+                    for item in objects
+                ),
+            )
+            self._profiler.record(
+                "Session extraction",
+                0.0,
+                sum(item.object_type.value == "SESSION" for item in objects),
+            )
+            self._profiler.record(
+                "Mapping extraction",
+                0.0,
+                sum(item.object_type.value == "MAPPING" for item in objects),
+            )
+            self._profiler.record(
+                "Transformation extraction",
+                0.0,
+                sum(
+                    item.object_type.value
+                    in {"SOURCE_QUALIFIER", "LOOKUP", "UPDATE_STRATEGY"}
+                    for item in objects
+                ),
+            )
+            self._profiler.record(
+                "Relation extraction",
+                perf_counter() - started_at,
+                sum(len(item.relation_candidates) for item in objects),
+            )
+            self._profiler.count("MetadataObject", len(objects))
+            self._profiler.record("MetadataObject creation", 0.0, len(objects))
+            self._profiler.count(
+                "Relation", sum(len(item.relation_candidates) for item in objects)
+            )
+            for object_type in {"WORKFLOW", "TASK", "SESSION", "MAPPING"}:
+                self._profiler.count(
+                    object_type.title(),
+                    sum(item.object_type.value == object_type for item in objects),
+                )
+            self._profiler.count(
+                "Transformation",
+                sum(
+                    item.object_type.value
+                    in {"SOURCE_QUALIFIER", "LOOKUP", "UPDATE_STRATEGY"}
+                    for item in objects
+                ),
+            )
         return objects
 
     def _folder(self, folder: ET.Element) -> list[MetadataObject]:
