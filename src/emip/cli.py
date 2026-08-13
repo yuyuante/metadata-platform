@@ -37,7 +37,7 @@ def run_scan(
     started_at = time.perf_counter()
     output_dir = report_dir if report_dir is not None else Path("scan-report")
     profiler = Profiler() if profile else None
-    file_scanner = scanner if scanner is not None else FolderScanner()
+    file_scanner = scanner if scanner is not None else FolderScanner(profiler)
     parser_scanner = (
         metadata_scanner
         if metadata_scanner is not None
@@ -139,8 +139,17 @@ def run_scan(
         encoding="utf-8",
     )
     if profiler is not None:
+        profiler.set_reason(
+            "Repository persistence",
+            "Per-object repository existence checks and writes",
+        )
+        profiler.set_reason(
+            "Metadata persistence", "Per-object repository existence checks and writes"
+        )
+        profiler.set_reason("XML parsing", "ElementTree XML parsing")
         profiler.record("Report generation", time.perf_counter() - report_started_at)
-        profiler.record("Total execution", time.perf_counter() - profiler.started_at)
+        profiler.record("Summary generation", time.perf_counter() - report_started_at)
+        profiler.finish()
         performance_path = output_dir / "performance-report.txt"
         profiler.write(performance_path)
         print(performance_path.read_text(encoding="utf-8"))

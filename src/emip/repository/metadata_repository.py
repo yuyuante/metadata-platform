@@ -189,7 +189,7 @@ class MetadataRepository:
             with self._connection.cursor() as cursor:
                 cursor.execute(query, values)
                 row = cursor.fetchone()
-                self._observe("insert")
+                self._observe("metadata_insert")
                 if self._column_table_available:
                     self._insert_columns(
                         cursor, metadata_object.object_id, metadata_object.columns
@@ -467,7 +467,7 @@ class MetadataRepository:
                             _to_database_timestamp(relation.created_at),
                         ),
                     )
-                    self._observe("insert")
+                    self._observe("relation_insert")
             self._connection.commit()
             self._observe("commit")
             self._observe("transaction")

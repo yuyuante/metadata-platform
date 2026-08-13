@@ -29,7 +29,14 @@ class InformaticaMetadataParser:
 
     def parse(self, path: Path) -> list[MetadataObject]:
         started_at = perf_counter()
-        root = ET.fromstring(_read_xml(path))
+        reading_started_at = perf_counter()
+        xml_text = _read_xml(path)
+        if self._profiler is not None:
+            self._profiler.record("File reading", perf_counter() - reading_started_at)
+        parsing_started_at = perf_counter()
+        root = ET.fromstring(xml_text)
+        if self._profiler is not None:
+            self._profiler.record("XML parsing", perf_counter() - parsing_started_at)
         if _name(root) != "POWERMART":
             raise ValueError("Unsupported XML root; expected POWERMART")
         objects: list[MetadataObject] = []
@@ -81,11 +88,11 @@ class InformaticaMetadataParser:
                     for item in objects
                 ),
             )
+            relation_count = sum(len(item.relation_candidates) for item in objects)
             self._profiler.record(
-                "Relation extraction",
-                perf_counter() - started_at,
-                sum(len(item.relation_candidates) for item in objects),
+                "Relation extraction", perf_counter() - started_at, relation_count
             )
+            self._profiler.record("Relation generation", 0.0, relation_count)
             self._profiler.count("MetadataObject", len(objects))
             self._profiler.record("MetadataObject creation", 0.0, len(objects))
             self._profiler.count(

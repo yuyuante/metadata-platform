@@ -110,6 +110,8 @@ class MetadataObjectPersister:
             try:
                 if self._repository.exists_object(metadata_object):
                     objects_skipped += 1
+                    if self._profiler is not None:
+                        self._profiler.repository_event("skipped")
                     get_object = getattr(self._repository, "get_object", None)
                     stored = (
                         get_object(metadata_object)
@@ -161,7 +163,7 @@ class MetadataObjectPersister:
         ]
         if self._profiler is not None:
             elapsed = perf_counter() - metadata_started_at
-            self._profiler.record("Metadata persistence", elapsed, objects_created)
+            self._profiler.record("Metadata persistence", elapsed, total_objects)
             self._profiler.repository.metadata_persistence_seconds += elapsed
         create_relations = getattr(self._repository, "create_relations", None)
         if candidates and create_relations is not None:
@@ -178,7 +180,7 @@ class MetadataObjectPersister:
             self._profiler.record(
                 "Repository persistence",
                 perf_counter() - persistence_started_at,
-                objects_created,
+                objects_created + objects_skipped + objects_failed,
             )
         return PersistenceResult(
             objects_created=objects_created,

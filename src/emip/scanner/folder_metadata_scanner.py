@@ -53,8 +53,12 @@ class FolderMetadataScanner:
         dispatcher: ParserDispatcher | None = None,
         profiler: Any | None = None,
     ) -> None:
-        self._scanner = scanner if scanner is not None else FolderScanner()
-        self._dispatcher = dispatcher if dispatcher is not None else ParserDispatcher()
+        self._scanner = (
+            scanner if scanner is not None else FolderScanner(profiler=profiler)
+        )
+        self._dispatcher = (
+            dispatcher if dispatcher is not None else ParserDispatcher(profiler)
+        )
         self._splitter = ScriptSplitter()
         self._filter = StatementFilter()
         self._profiler = profiler

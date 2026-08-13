@@ -135,7 +135,9 @@ scripts\scan.bat perf
 ```
 
 The profiling summary is printed to the console and written to
-`scan-report/performance-report.txt`.
+`scan-report/performance-report.txt` and the stable JSON companion
+`scan-report/performance-report.json`. Every parser can use the same
+`Profiler.start("Stage")` / `Profiler.stop("Stage")` API.
 
 The workflow scan defaults to `D:\workplace\infa_fs2\xml` and scans recursively. Set `EMIP_WORKFLOW_ROOT` to override it. The script continues after an individual repository failure, prints each result and a final summary, and returns a non-zero exit code when any scan fails. Missing repositories are reported as skipped. Database settings continue to come from the existing project configuration; credentials are not stored in the batch file.
 Workflow 掃描預設使用 `D:\workplace\infa_fs2\xml` 並遞迴掃描；可設定 `EMIP_WORKFLOW_ROOT` 覆寫。批次檔會在單一 repository 失敗後繼續執行，列出每次結果與最終摘要；任一掃描失敗時回傳非零結束碼。不存在的 repository 會列為略過。資料庫設定仍沿用專案既有設定，批次檔不保存憑證。
