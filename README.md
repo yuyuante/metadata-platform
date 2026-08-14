@@ -169,6 +169,22 @@ uv run mypy src
 The release provides the first executable scanner-to-Greenplum SQL metadata flow and a generic object-level metadata relationship graph.
 此版本提供第一個可執行的「掃描器至 Greenplum SQL 中繼資料」流程，以及通用的物件層級中繼資料關係圖。
 
+## Developer Query Examples
+
+EMIP provides repository-only developer queries. Query execution does not rescan
+source files or reparse SQL/XML.
+
+```text
+python -m emip query object CUSTOMER
+python -m emip query search "cust*"
+python -m emip query workflow wf_MB_AC500
+python -m emip query impact CUSTOMER --depth 3
+python -m emip query depends proc_sync_customer
+python -m emip query used-by CUSTOMER
+python -m emip query path CUSTOMER ACCOUNT
+python -m emip query search customer --json
+```
+
 ## Current Limitations / 目前限制
 
 - Only SQL DDL parsing is implemented / 目前僅實作 SQL DDL 解析

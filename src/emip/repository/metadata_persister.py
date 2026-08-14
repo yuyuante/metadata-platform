@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, cast
 
-from emip.domain import MetadataObject
+from emip.domain import MetadataObject, Relation
 from emip.repository.metadata_repository import MetadataRepository
 
 
@@ -91,6 +91,22 @@ class MetadataObjectPersister:
         if method is None:
             return []
         return cast(list[MetadataObject], method())
+
+    def find_objects(self) -> list[MetadataObject]:
+        """Return all persisted objects for the developer query engine."""
+
+        method = getattr(self._repository, "find_objects", None)
+        if method is None:
+            return []
+        return cast(list[MetadataObject], method())
+
+    def find_relations(self) -> list[Relation]:
+        """Return all persisted relations for the developer query engine."""
+
+        method = getattr(self._repository, "find_relations", None)
+        if method is None:
+            return []
+        return cast(list[Relation], method())
 
     def persist(self, objects: Iterable[MetadataObject]) -> PersistenceResult:
         """Create new objects, skip existing objects, and count failures."""

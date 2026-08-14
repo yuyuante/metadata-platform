@@ -106,6 +106,19 @@ def _row_to_metadata_object(row: tuple[Any, ...]) -> MetadataObject:
     )
 
 
+def _row_to_relation(row: tuple[Any, ...]) -> Relation:
+    """Convert a Greenplum relation row into the canonical domain object."""
+
+    return Relation(
+        relation_id=UUID(str(row[0])),
+        source_object_id=UUID(str(row[1])),
+        target_object_id=UUID(str(row[2])),
+        relation_type=row[3],
+        source_type=row[4],
+        created_at=_from_database_timestamp(row[5]),
+    )
+
+
 class MetadataRepository:
     """Persist MetadataObject instances in Greenplum."""
 
@@ -452,6 +465,33 @@ class MetadataRepository:
             rows = cursor.fetchall()
         return [_row_to_metadata_object(row) for row in rows]
 
+    def find_objects(self) -> list[MetadataObject]:
+        """Return all persisted objects for repository-only queries."""
+
+        query = sql.SQL("SELECT {} FROM {} ORDER BY qualified_name, object_id").format(
+            _RETURNING_COLUMNS, self._table_identifier
+        )
+        with self._connection.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+        return [_row_to_metadata_object(row) for row in rows]
+
+    def find_relations(self) -> list[Relation]:
+        """Return all persisted relations for repository-only graph queries."""
+
+        query = sql.SQL(
+            "SELECT relation_id, from_object_id, to_object_id, relation_type, "
+            "source_type, created_at FROM {} ORDER BY created_at, relation_id"
+        ).format(self._relation_table_identifier)
+        try:
+            with self._connection.cursor() as cursor:
+                cursor.execute(query)
+                rows = cursor.fetchall()
+        except psycopg2.errors.UndefinedTable:
+            self._connection.rollback()
+            return []
+        return [_row_to_relation(row) for row in rows]
+
     def create_relation(self, relation: Relation) -> Relation:
         """Insert one resolved relation; duplicate graph edges are harmless."""
         exists_query = sql.SQL(
@@ -543,17 +583,7 @@ class MetadataRepository:
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
             return []
-        return [
-            Relation(
-                source_object_id=UUID(str(row[1])),
-                target_object_id=UUID(str(row[2])),
-                relation_type=row[3],
-                source_type=row[4],
-                created_at=_from_database_timestamp(row[5]),
-                relation_id=UUID(str(row[0])),
-            )
-            for row in rows
-        ]
+        return [_row_to_relation(row) for row in rows]
 
     def delete_object(self, metadata_object: MetadataObject) -> MetadataObject | None:
         """Delete and return a MetadataObject, or None when it does not exist."""

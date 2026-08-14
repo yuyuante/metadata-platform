@@ -8,6 +8,7 @@ from pathlib import Path
 from emip import __version__
 from emip.profiling import Profiler
 from emip.repository.metadata_persister import MetadataObjectPersister
+from emip.repository.metadata_repository import MetadataRepository
 from emip.scanner.folder_metadata_scanner import FolderMetadataScanner
 from emip.scanner.folder_scanner import FolderScanner
 from emip.scanner.scan_report import ScanReportWriter, ScanSummary
@@ -15,6 +16,7 @@ from emip.services.metadata_integration import (
     MetadataIntegrationService,
     render_integration_report,
 )
+from emip.services.query_engine import QueryEngine, tree_lines
 
 
 def _print_persistence_progress(message: str) -> None:
@@ -228,7 +230,120 @@ def _build_parser() -> argparse.ArgumentParser:
     scan_parser = subparsers.add_parser("scan")
     scan_parser.add_argument("folder", type=Path)
     scan_parser.add_argument("--profile", action="store_true")
+    query_parser = subparsers.add_parser("query")
+    query_commands = query_parser.add_subparsers(dest="query_command", required=True)
+
+    def add_json_option(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument("--json", action="store_true")
+
+    object_parser = query_commands.add_parser("object")
+    object_parser.add_argument("term")
+    add_json_option(object_parser)
+    search_parser = query_commands.add_parser("search")
+    search_parser.add_argument("term")
+    add_json_option(search_parser)
+    workflow_parser = query_commands.add_parser("workflow")
+    workflow_parser.add_argument("term")
+    add_json_option(workflow_parser)
+    for command in ("impact", "depends", "used-by"):
+        command_parser = query_commands.add_parser(command)
+        command_parser.add_argument("term")
+        command_parser.add_argument(
+            "--depth", type=int, default=1 if command == "impact" else 999999
+        )
+        add_json_option(command_parser)
+    path_parser = query_commands.add_parser("path")
+    path_parser.add_argument("source")
+    path_parser.add_argument("target")
+    add_json_option(path_parser)
     return parser
+
+
+def _print_query_result(result: object, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return
+    if isinstance(result, dict) and "object_type" in result:
+        for key in (
+            "object_type",
+            "qualified_name",
+            "schema",
+            "database",
+            "provider",
+            "description",
+        ):
+            print(f"{key.replace('_', ' ').title()}: {result.get(key) or ''}")
+        return
+    if isinstance(result, list):
+        for item in result:
+            if isinstance(item, dict):
+                print(
+                    f"{item.get('object_type', '')}  {item.get('qualified_name', '')}  "
+                    f"[{item.get('provider', '')}]"
+                )
+        if not result:
+            print("No objects found.")
+        return
+    if isinstance(result, dict) and "groups" in result:
+        groups = result["groups"]
+        if isinstance(groups, dict):
+            for name, items in groups.items():
+                print(f"{name}:")
+                for item in items:
+                    print(f"  - {item['qualified_name']} (depth {item['depth']})")
+        return
+    if isinstance(result, dict) and ("depends_on" in result or "used_by" in result):
+        key = "depends_on" if "depends_on" in result else "used_by"
+        print(f"{key.replace('_', ' ').title()} {result.get('object')}:")
+        items = result[key]
+        if isinstance(items, list):
+            for item in items:
+                print(f"  - {item['qualified_name']} (depth {item['depth']})")
+            if not items:
+                print("  None")
+        return
+    if isinstance(result, dict):
+        for line in tree_lines(result):
+            print(line)
+
+
+def run_query(args: argparse.Namespace) -> int:
+    """Execute one query without scanning or parsing source files."""
+
+    try:
+        engine = QueryEngine(MetadataRepository())
+        command = args.query_command
+        if command == "object":
+            result: object = engine.object_lookup(args.term)
+        elif command == "search":
+            result = engine.search(args.term)
+        elif command == "workflow":
+            result = engine.workflow(args.term)
+        elif command == "impact":
+            result = {
+                "object": args.term,
+                "groups": engine.impact(args.term, args.depth),
+            }
+        elif command == "depends":
+            result = {
+                "object": args.term,
+                "depends_on": engine.depends(args.term, args.depth),
+            }
+        elif command == "used-by":
+            result = {
+                "object": args.term,
+                "used_by": engine.used_by(args.term, args.depth),
+            }
+        elif command == "path":
+            result = engine.path(args.source, args.target)
+        else:
+            print(f"Unsupported query: {command}")
+            return 1
+        _print_query_result(result, args.json)
+        return 0
+    except (OSError, ValueError) as error:
+        print(f"Query failed: {error}")
+        return 1
 
 
 def main() -> int:
@@ -237,4 +352,6 @@ def main() -> int:
     args = _build_parser().parse_args()
     if args.command == "scan":
         return run_scan(args.folder, profile=args.profile)
+    if args.command == "query":
+        return run_query(args)
     return 1
