@@ -3,7 +3,7 @@
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Any
+from typing import Any, cast
 
 from emip.domain import MetadataObject
 from emip.repository.metadata_repository import MetadataRepository
@@ -83,6 +83,14 @@ class MetadataObjectPersister:
     def _report_progress(self, message: str) -> None:
         if self._progress_callback is not None:
             self._progress_callback(message)
+
+    def find_physical_objects(self) -> list[MetadataObject]:
+        """Return persisted physical objects for metadata integration."""
+
+        method = getattr(self._repository, "find_physical_objects", None)
+        if method is None:
+            return []
+        return cast(list[MetadataObject], method())
 
     def persist(self, objects: Iterable[MetadataObject]) -> PersistenceResult:
         """Create new objects, skip existing objects, and count failures."""

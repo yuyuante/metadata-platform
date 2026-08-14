@@ -11,6 +11,10 @@ from emip.repository.metadata_persister import MetadataObjectPersister
 from emip.scanner.folder_metadata_scanner import FolderMetadataScanner
 from emip.scanner.folder_scanner import FolderScanner
 from emip.scanner.scan_report import ScanReportWriter, ScanSummary
+from emip.services.metadata_integration import (
+    MetadataIntegrationService,
+    render_integration_report,
+)
 
 
 def _print_persistence_progress(message: str) -> None:
@@ -101,6 +105,25 @@ def run_scan(
             dynamic_sql_files.append((path, dynamic_statuses))
         objects.extend(result.objects)
 
+    find_physical_objects = getattr(object_persister, "find_physical_objects", None)
+    existing_physical_objects = (
+        find_physical_objects() if find_physical_objects is not None else []
+    )
+    integration_result = MetadataIntegrationService().integrate(
+        objects, existing_physical_objects
+    )
+    objects = list(integration_result.objects)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    integration_report_path = output_dir / "integration-report.txt"
+    integration_report_path.write_text(
+        render_integration_report(integration_result), encoding="utf-8"
+    )
+    print(
+        "Integration: "
+        f"merged={integration_result.objects_merged}, "
+        f"cross-provider-links={integration_result.cross_provider_links_created}",
+        flush=True,
+    )
     print("Saving...", flush=True)
     persistence_result = object_persister.persist(objects)
     elapsed_seconds = time.perf_counter() - started_at
@@ -165,6 +188,8 @@ def run_scan(
     print(f"Objects created  : {persistence_result.objects_created}")
     print(f"Objects skipped  : {persistence_result.objects_skipped}")
     print(f"Objects failed   : {persistence_result.objects_failed}")
+    print(f"Objects merged   : {integration_result.objects_merged}")
+    print("Cross-provider links: " f"{integration_result.cross_provider_links_created}")
     print("Repository failure classification:")
     if persistence_result.failure_categories:
         for category, count in sorted(
@@ -175,6 +200,7 @@ def run_scan(
     else:
         print("  None")
     print(f"Repository failure report: {repository_failure_path}")
+    print(f"Integration report: {integration_report_path}")
     print("Files with multiple objects:")
     if multiple_object_files:
         for path, object_count in multiple_object_files:

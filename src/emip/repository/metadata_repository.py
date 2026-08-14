@@ -434,6 +434,24 @@ class MetadataRepository:
             row = cursor.fetchone()
         return None if row is None else _row_to_metadata_object(row)
 
+    def find_physical_objects(self) -> list[MetadataObject]:
+        """Return persisted table-like objects for cross-provider resolution."""
+
+        query = sql.SQL("SELECT {} FROM {} WHERE object_type IN (%s, %s, %s)").format(
+            _RETURNING_COLUMNS, self._table_identifier
+        )
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                query,
+                (
+                    ObjectType.TABLE.value,
+                    ObjectType.VIEW.value,
+                    ObjectType.MATERIALIZED_VIEW.value,
+                ),
+            )
+            rows = cursor.fetchall()
+        return [_row_to_metadata_object(row) for row in rows]
+
     def create_relation(self, relation: Relation) -> Relation:
         """Insert one resolved relation; duplicate graph edges are harmless."""
         exists_query = sql.SQL(
