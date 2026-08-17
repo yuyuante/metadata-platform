@@ -84,6 +84,39 @@ class MetadataObjectPersister:
         if self._progress_callback is not None:
             self._progress_callback(message)
 
+    def _resolve_existing_object(
+        self, metadata_object: MetadataObject
+    ) -> MetadataObject | None:
+        """Resolve a skipped object using repository identity, not a new UUID."""
+
+        get_object = getattr(self._repository, "get_object", None)
+        stored = (
+            cast(MetadataObject | None, get_object(metadata_object))
+            if get_object is not None
+            else None
+        )
+        if stored is not None:
+            return stored
+        find_by_identity = getattr(self._repository, "find_object_by_identity", None)
+        if find_by_identity is not None:
+            stored = cast(
+                MetadataObject | None,
+                find_by_identity(
+                    metadata_object.system_name, metadata_object.qualified_name
+                ),
+            )
+            if stored is not None:
+                return stored
+        find_by_qualified_name = getattr(
+            self._repository, "find_object_by_qualified_name", None
+        )
+        if find_by_qualified_name is not None:
+            return cast(
+                MetadataObject | None,
+                find_by_qualified_name(metadata_object.qualified_name),
+            )
+        return None
+
     def find_physical_objects(self) -> list[MetadataObject]:
         """Return persisted physical objects for metadata integration."""
 
@@ -136,12 +169,7 @@ class MetadataObjectPersister:
                     objects_skipped += 1
                     if self._profiler is not None:
                         self._profiler.repository_event("skipped")
-                    get_object = getattr(self._repository, "get_object", None)
-                    stored = (
-                        get_object(metadata_object)
-                        if get_object is not None
-                        else metadata_object
-                    )
+                    stored = self._resolve_existing_object(metadata_object)
                     if stored is not None:
                         resolved_sources.append(
                             (stored, metadata_object.relation_candidates)

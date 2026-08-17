@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg2  # type: ignore[import-untyped]
 from psycopg2 import sql
@@ -539,25 +539,65 @@ class MetadataRepository:
     ) -> int:
         """Resolve and persist only candidates whose target already exists."""
         count = 0
-        for source, candidate in candidates:
-            target = self.find_object_by_identity(
-                source.system_name, candidate.target_qualified_name
+        objects_by_identity: dict[tuple[str, str], MetadataObject] = {}
+        objects_by_name: dict[str, MetadataObject] = {}
+        for metadata_object in self.find_objects():
+            objects_by_identity.setdefault(
+                (metadata_object.system_name, metadata_object.qualified_name),
+                metadata_object,
             )
-            if target is None:
-                target = self.find_object_by_qualified_name(
-                    candidate.target_qualified_name
-                )
-            if target is None:
-                continue
-            self.create_relation(
-                Relation(
-                    source_object_id=source.object_id,
-                    target_object_id=target.object_id,
-                    relation_type=candidate.relation_type,
-                    source_type=candidate.source_type,
-                )
+            objects_by_name.setdefault(metadata_object.qualified_name, metadata_object)
+        existing_edges = {
+            (
+                relation.source_object_id,
+                relation.target_object_id,
+                str(relation.relation_type),
+                relation.source_type,
             )
-            count += 1
+            for relation in self.find_relations()
+        }
+        insert_query = sql.SQL(
+            "INSERT INTO {} (relation_id, from_object_id, to_object_id, "
+            "relation_type, source_type, created_at) VALUES (%s,%s,%s,%s,%s,%s)"
+        ).format(self._relation_table_identifier)
+        inserts: list[tuple[str, str, str, str, str, datetime]] = []
+        try:
+            for source, candidate in candidates:
+                target = objects_by_identity.get(
+                    (source.system_name, candidate.target_qualified_name)
+                ) or objects_by_name.get(candidate.target_qualified_name)
+                if target is None:
+                    continue
+                edge = (
+                    source.object_id,
+                    target.object_id,
+                    str(candidate.relation_type),
+                    candidate.source_type,
+                )
+                count += 1
+                if edge in existing_edges:
+                    continue
+                existing_edges.add(edge)
+                inserts.append(
+                    (
+                        str(uuid4()),
+                        str(source.object_id),
+                        str(target.object_id),
+                        edge[2],
+                        edge[3],
+                        _to_database_timestamp(datetime.now(UTC)),
+                    )
+                )
+            with self._connection.cursor() as cursor:
+                if inserts:
+                    cursor.executemany(insert_query, inserts)
+                    self._observe("relation_insert", len(inserts))
+            self._connection.commit()
+            self._observe("commit")
+            self._observe("transaction")
+        except psycopg2.Error:
+            self._connection.rollback()
+            raise
         return count
 
     def find_upstream(self, object_id: UUID) -> list[Relation]:

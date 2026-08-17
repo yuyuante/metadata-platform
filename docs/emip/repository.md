@@ -15,6 +15,13 @@ three-part names (`database.schema.object`) are compared by their schema and
 object suffix.  A physical object is therefore represented by one logical
 `MetadataObject` when providers use equivalent names.
 
+Cross-provider matching uses the same normalization module (`emip.identity`) in
+the SQL and Informatica integration paths.  In addition to SQL quoting, the
+normalizer handles Informatica's `::` path separator and provider prefixes such
+as `sc_`, `sc_svel_`, `src_`, and `tgt_`.  For example, `STKOUT`,
+`[dbo].[STKOUT]`, `"dbo"."STKOUT"`, and an Informatica definition ending in
+`sc_STKOUT` can resolve to the physical SQL object `dbo.STKOUT`.
+
 ### Merge strategy
 
 Duplicate physical identities are merged before persistence.  The first
@@ -23,6 +30,12 @@ objects are combined without duplicates.  Missing columns or properties are
 filled from the later provider object.  Informatica source and target
 definitions remain provider objects, and receive `READS` or `WRITES` links to
 an unambiguous SQL physical object when their normalized name matches.
+When a skipped repository object is encountered, persistence resolves the
+stored object by system/name or qualified name before writing its relation
+candidate.  This preserves one physical object identity on reruns and avoids
+losing cross-provider links merely because the parser generated a new UUID.
+Ambiguous physical matches are not merged automatically; they are reported for
+review so that no incorrect relation is created.
 
 ### Relation validation
 

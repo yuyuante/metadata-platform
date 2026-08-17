@@ -1,6 +1,6 @@
 from typing import cast
 
-from emip.domain import MetadataObject, ObjectType
+from emip.domain import MetadataObject, ObjectType, RelationCandidate, RelationType
 from emip.repository.metadata_persister import (
     MetadataObjectPersister,
     PersistenceResult,
@@ -13,6 +13,7 @@ class InMemoryMetadataRepository:
     def __init__(self) -> None:
         self.objects: list[MetadataObject] = []
         self.existing: set[str] = set()
+        self.relation_candidates: list[tuple[MetadataObject, RelationCandidate]] = []
 
     def exists_object(self, metadata_object: MetadataObject) -> bool:
         return metadata_object.qualified_name in self.existing
@@ -21,6 +22,36 @@ class InMemoryMetadataRepository:
         self.objects.append(metadata_object)
         self.existing.add(metadata_object.qualified_name)
         return metadata_object
+
+    def get_object(self, metadata_object: MetadataObject) -> MetadataObject | None:
+        return None
+
+    def find_object_by_identity(
+        self, system_name: str, qualified_name: str
+    ) -> MetadataObject | None:
+        return next(
+            (
+                item
+                for item in self.objects
+                if item.system_name == system_name
+                and item.qualified_name == qualified_name
+            ),
+            None,
+        )
+
+    def find_object_by_qualified_name(
+        self, qualified_name: str
+    ) -> MetadataObject | None:
+        return next(
+            (item for item in self.objects if item.qualified_name == qualified_name),
+            None,
+        )
+
+    def create_relations(
+        self, candidates: list[tuple[MetadataObject, RelationCandidate]]
+    ) -> int:
+        self.relation_candidates.extend(candidates)
+        return len(candidates)
 
 
 def _object(name: str) -> MetadataObject:
@@ -58,6 +89,27 @@ def test_persist_skips_existing_metadata_object() -> None:
         objects_created=1, objects_skipped=1, objects_failed=0
     )
     assert [item.name for item in repository.objects] == ["order"]
+
+
+def test_persist_resolves_skipped_object_by_identity_for_relations() -> None:
+    repository = InMemoryMetadataRepository()
+    existing = _object("customer")
+    repository.objects.append(existing)
+    repository.existing.add(existing.qualified_name)
+    candidate = RelationCandidate(
+        source_qualified_name=existing.qualified_name,
+        target_qualified_name="sales.order",
+        relation_type=RelationType.READS,
+        source_type="TEST",
+        evidence_sql="identity resolution",
+    )
+    incoming = _object("customer")
+    incoming.relation_candidates = (candidate,)
+
+    result = _persister(repository).persist([incoming])
+
+    assert result.objects_skipped == 1
+    assert repository.relation_candidates == [(existing, candidate)]
 
 
 def test_persist_counts_failed_object_and_continues() -> None:

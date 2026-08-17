@@ -52,6 +52,25 @@ def test_links_informatica_definitions_to_sql_objects() -> None:
     )
 
 
+def test_links_informatica_prefixed_definition_to_sql_object() -> None:
+    table = _object(ObjectType.TABLE, "dbo.STKOUT", "STKOUT")
+    source = _object(
+        ObjectType.SOURCE_DEFINITION,
+        "SVELAH::wf_MBAH_SYNC::s_m_MBAHSYNC_STKOUT::sc_STKOUT",
+        "sc_STKOUT",
+    )
+    target = _object(
+        ObjectType.TARGET_DEFINITION,
+        "SVELAH::wf_MBAH_SYNC::s_m_MBAHSYNC_STKOUT::sc_svel_STKOUT",
+        "sc_svel_STKOUT",
+    )
+
+    result = MetadataIntegrationService().integrate([table, source, target])
+
+    assert result.cross_provider_links_created == 2
+    assert all(item.relation_candidates for item in result.objects[1:])
+
+
 def test_reports_dangling_and_self_relations() -> None:
     item = _object(ObjectType.WORKFLOW, "F::W", "W")
     item.relation_candidates = item.relation_candidates + (

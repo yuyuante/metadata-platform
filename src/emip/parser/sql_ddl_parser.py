@@ -16,6 +16,7 @@ from emip.domain import (
     RelationCandidate,
     RelationType,
 )
+from emip.identity import unquote_identifier
 from emip.parser.dynamic_sql_resolver import DynamicSqlResolver
 
 _SUPPORTED_TYPES: dict[str, ObjectType] = {
@@ -138,7 +139,7 @@ _TRIGGER_UPDATE_OF = re.compile(r"\bUPDATE\s+OF\s+(.+?)\s+ON\b", re.I | re.S)
 
 
 def _clean_ref(value: str) -> str:
-    return ".".join(part.strip().strip('[]"') for part in value.split("."))
+    return ".".join(unquote_identifier(value))
 
 
 def _with_relationships(

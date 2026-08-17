@@ -7,6 +7,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from emip.domain import MetadataObject, ObjectType, RelationCandidate, RelationType
+from emip.identity import (
+    normalize_identifier,
+    physical_identity_keys,
+    suffix_identity_keys,
+)
 
 _PHYSICAL_TYPES = frozenset(
     {ObjectType.TABLE, ObjectType.VIEW, ObjectType.MATERIALIZED_VIEW}
@@ -16,42 +21,7 @@ _DEFINITION_TYPES = frozenset(
 )
 
 
-def normalize_identifier(value: str) -> tuple[str, ...]:
-    """Return case-insensitive identifier segments without SQL quoting."""
-
-    segments: list[str] = []
-    current: list[str] = []
-    quote: str | None = None
-    for character in value.strip():
-        if quote is not None:
-            if character == quote:
-                quote = None
-            else:
-                current.append(character)
-        elif character in {'"', "'", "["}:
-            quote = "]" if character == "[" else character
-        elif character == ".":
-            if current:
-                segments.append("".join(current).strip().casefold())
-                current = []
-        else:
-            current.append(character)
-    if current:
-        segments.append("".join(current).strip().casefold())
-    return tuple(segment for segment in segments if segment)
-
-
-def _physical_keys(value: str) -> set[tuple[str, ...]]:
-    """Build matching keys for two- and three-part physical names."""
-
-    parts = normalize_identifier(value)
-    if not parts:
-        return set()
-    keys = {parts}
-    if len(parts) >= 2:
-        keys.add(parts[-2:])
-    keys.add((parts[-1],))
-    return keys
+_INFORMATICA_PREFIXES = ("sc_svel_", "sc_", "svel_", "src_", "tgt_")
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +102,7 @@ class MetadataIntegrationService:
             if item.object_type in _PHYSICAL_TYPES:
                 physical_by_identity[(item.object_type, self._identity(item))] = item
         for item in physical_by_identity.values():
-            for key in _physical_keys(item.qualified_name):
+            for key in physical_identity_keys(item.qualified_name):
                 physical[key].append(item)
         created = 0
         for definition in objects:
@@ -174,7 +144,7 @@ class MetadataIntegrationService:
         )
         keys: set[tuple[str, ...]] = set()
         for value in values:
-            keys.update(_physical_keys(value))
+            keys.update(suffix_identity_keys(value, _INFORMATICA_PREFIXES))
         return keys
 
     @staticmethod
