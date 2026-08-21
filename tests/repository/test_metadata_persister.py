@@ -1,6 +1,12 @@
 from typing import cast
 
-from emip.domain import MetadataObject, ObjectType, RelationCandidate, RelationType
+from emip.domain import (
+    MetadataObject,
+    ObjectProperty,
+    ObjectType,
+    RelationCandidate,
+    RelationType,
+)
 from emip.repository.metadata_persister import (
     MetadataObjectPersister,
     PersistenceResult,
@@ -14,6 +20,7 @@ class InMemoryMetadataRepository:
         self.objects: list[MetadataObject] = []
         self.existing: set[str] = set()
         self.relation_candidates: list[tuple[MetadataObject, RelationCandidate]] = []
+        self.updated: list[MetadataObject] = []
 
     def exists_object(self, metadata_object: MetadataObject) -> bool:
         return metadata_object.qualified_name in self.existing
@@ -52,6 +59,10 @@ class InMemoryMetadataRepository:
     ) -> int:
         self.relation_candidates.extend(candidates)
         return len(candidates)
+
+    def update_object(self, metadata_object: MetadataObject) -> MetadataObject:
+        self.updated.append(metadata_object)
+        return metadata_object
 
 
 def _object(name: str) -> MetadataObject:
@@ -110,6 +121,74 @@ def test_persist_resolves_skipped_object_by_identity_for_relations() -> None:
 
     assert result.objects_skipped == 1
     assert repository.relation_candidates == [(existing, candidate)]
+
+
+def test_persist_does_not_update_identical_content_with_new_property_ids() -> None:
+    repository = InMemoryMetadataRepository()
+    existing = _object("customer")
+    existing.properties = (
+        ObjectProperty(
+            object_id=existing.object_id,
+            property_name="connection",
+            property_value="ODBC_SQL_SVEL",
+        ),
+    )
+    repository.objects.append(existing)
+    repository.existing.add(existing.qualified_name)
+    incoming = _object("customer")
+    incoming.properties = (
+        ObjectProperty(
+            object_id=incoming.object_id,
+            property_name="connection",
+            property_value="ODBC_SQL_SVEL",
+        ),
+    )
+
+    result = _persister(repository).persist([incoming])
+
+    assert result.objects_skipped == 1
+    assert repository.updated == []
+
+
+def test_persist_updates_changed_property_content() -> None:
+    repository = InMemoryMetadataRepository()
+    existing = _object("customer")
+    existing.properties = (
+        ObjectProperty(
+            object_id=existing.object_id,
+            property_name="connection",
+            property_value="OLD_CONNECTION",
+        ),
+    )
+    repository.objects.append(existing)
+    repository.existing.add(existing.qualified_name)
+    incoming = _object("customer")
+    incoming.properties = (
+        ObjectProperty(
+            object_id=incoming.object_id,
+            property_name="connection",
+            property_value="ODBC_SQL_SVEL",
+        ),
+    )
+
+    result = _persister(repository).persist([incoming])
+
+    assert result.objects_skipped == 1
+    assert repository.updated == [incoming]
+
+
+def test_persist_updates_changed_core_metadata() -> None:
+    repository = InMemoryMetadataRepository()
+    existing = _object("customer")
+    repository.objects.append(existing)
+    repository.existing.add(existing.qualified_name)
+    incoming = _object("customer")
+    incoming.description = "updated description"
+
+    result = _persister(repository).persist([incoming])
+
+    assert result.objects_skipped == 1
+    assert repository.updated == [incoming]
 
 
 def test_persist_counts_failed_object_and_continues() -> None:

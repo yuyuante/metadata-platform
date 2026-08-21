@@ -68,9 +68,11 @@ def physical_identity_keys(value: str) -> set[tuple[str, ...]]:
 
 
 def suffix_identity_keys(
-    value: str, removable_prefixes: tuple[str, ...] = ()
+    value: str,
+    removable_prefixes: tuple[str, ...] = (),
+    removable_suffixes: tuple[str, ...] = (),
 ) -> set[tuple[str, ...]]:
-    """Build physical keys and optionally remove provider naming prefixes."""
+    """Build physical keys and optionally remove provider naming affixes."""
 
     keys = physical_identity_keys(value)
     parts = normalize_identifier(value)
@@ -86,6 +88,20 @@ def suffix_identity_keys(
                 normalized_prefix
             ):
                 terminal = terminal[len(normalized_prefix) :]
+                changed = True
+                break
+    if terminal != parts[-1]:
+        keys.add((terminal,))
+
+    changed = True
+    while changed:
+        changed = False
+        for suffix in sorted(removable_suffixes, key=len, reverse=True):
+            normalized_suffix = suffix.casefold()
+            if terminal.endswith(normalized_suffix) and len(terminal) > len(
+                normalized_suffix
+            ):
+                terminal = terminal[: -len(normalized_suffix)]
                 changed = True
                 break
     if terminal != parts[-1]:

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, cast
 
-from emip.domain import MetadataObject, Relation
+from emip.domain import Column, MetadataObject, ObjectProperty, Relation
 from emip.repository.metadata_repository import MetadataRepository
 
 
@@ -117,6 +117,65 @@ class MetadataObjectPersister:
             )
         return None
 
+    @staticmethod
+    def _property_content(
+        properties: tuple[ObjectProperty, ...],
+    ) -> list[tuple[str, str | None]]:
+        """Return property content without persistence-owned identifiers."""
+
+        return sorted((item.property_name, item.property_value) for item in properties)
+
+    @staticmethod
+    def _column_content(
+        columns: tuple[Column, ...],
+    ) -> list[tuple[str, int, str | None, bool, str | None, bool, bool]]:
+        """Return column content without persistence-owned identifiers."""
+
+        return sorted(
+            (
+                item.column_name,
+                item.ordinal_position,
+                item.datatype,
+                item.nullable,
+                item.default_value,
+                item.is_primary_key,
+                item.is_unique,
+            )
+            for item in columns
+        )
+
+    @classmethod
+    def _metadata_content_changed(
+        cls, stored: MetadataObject, incoming: MetadataObject
+    ) -> bool:
+        stored_identity = (
+            stored.object_type,
+            stored.system_name,
+            stored.qualified_name,
+            stored.name,
+            stored.display_name,
+            stored.description,
+            stored.owner_name,
+            stored.status,
+        )
+        incoming_identity = (
+            incoming.object_type,
+            incoming.system_name,
+            incoming.qualified_name,
+            incoming.name,
+            incoming.display_name,
+            incoming.description,
+            incoming.owner_name,
+            incoming.status,
+        )
+        return (
+            stored_identity != incoming_identity
+            or cls._property_content(stored.properties)
+            != cls._property_content(incoming.properties)
+            or cls._column_content(stored.columns)
+            != cls._column_content(incoming.columns)
+        )
+
     def find_physical_objects(self) -> list[MetadataObject]:
         """Return persisted physical objects for metadata integration."""
 
@@ -171,6 +230,15 @@ class MetadataObjectPersister:
                         self._profiler.repository_event("skipped")
                     stored = self._resolve_existing_object(metadata_object)
                     if stored is not None:
+                        if self._metadata_content_changed(stored, metadata_object):
+                            update_object = getattr(
+                                self._repository, "update_object", None
+                            )
+                            if update_object is not None:
+                                metadata_object.object_id = stored.object_id
+                                updated = update_object(metadata_object)
+                                if updated is not None:
+                                    stored = updated
                         resolved_sources.append(
                             (stored, metadata_object.relation_candidates)
                         )

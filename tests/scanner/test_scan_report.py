@@ -25,6 +25,8 @@ def test_scan_report_writer_creates_all_report_files(tmp_path: Path) -> None:
         "files_supported": 1,
         "files_failed": 1,
         "objects_created": 0,
+        "objects_skipped": 0,
+        "objects_failed": 0,
         "elapsed_seconds": 1.235,
     }
     assert (output_dir / "failed-files.csv").read_text(

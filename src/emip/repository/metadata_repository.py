@@ -1,5 +1,6 @@
 """Greenplum repository for canonical metadata objects."""
 
+from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -18,7 +19,9 @@ from emip.domain import (
     ObjectType,
     Relation,
     RelationCandidate,
+    RelationType,
 )
+from emip.identity import normalize_identifier
 
 _OBJECT_COLUMNS = (
     "OBJECT_ID",
@@ -387,6 +390,37 @@ class MetadataRepository:
             for row in rows
         )
 
+    def _load_properties_for_objects(
+        self, object_ids: list[UUID]
+    ) -> dict[UUID, tuple[ObjectProperty, ...]]:
+        """Load query properties in one round trip instead of one per object."""
+
+        result: dict[UUID, tuple[ObjectProperty, ...]] = {
+            object_id: () for object_id in object_ids
+        }
+        if not object_ids:
+            return result
+        query = sql.SQL(
+            "SELECT {} FROM {} WHERE object_id = ANY(%s::uuid[]) "
+            "ORDER BY object_id, property_name"
+        ).format(_PROPERTY_RETURNING_COLUMNS, self._property_table_identifier)
+        try:
+            with self._connection.cursor() as cursor:
+                cursor.execute(query, ([str(object_id) for object_id in object_ids],))
+                rows = cursor.fetchall()
+        except psycopg2.errors.UndefinedTable:
+            self._connection.rollback()
+            return result
+        grouped: dict[UUID, list[ObjectProperty]] = defaultdict(list)
+        for row in rows:
+            property_item = ObjectProperty(
+                UUID(str(row[0])), UUID(str(row[1])), row[2], row[3]
+            )
+            grouped[property_item.object_id].append(property_item)
+        return {
+            object_id: tuple(grouped.get(object_id, ())) for object_id in object_ids
+        }
+
     def _replace_columns(
         self,
         cursor: Any,
@@ -474,7 +508,13 @@ class MetadataRepository:
         with self._connection.cursor() as cursor:
             cursor.execute(query)
             rows = cursor.fetchall()
-        return [_row_to_metadata_object(row) for row in rows]
+        objects = [_row_to_metadata_object(row) for row in rows]
+        properties = self._load_properties_for_objects(
+            [metadata_object.object_id for metadata_object in objects]
+        )
+        for metadata_object in objects:
+            metadata_object.properties = properties[metadata_object.object_id]
+        return objects
 
     def find_relations(self) -> list[Relation]:
         """Return all persisted relations for repository-only graph queries."""
@@ -537,16 +577,93 @@ class MetadataRepository:
     def create_relations(
         self, candidates: list[tuple[MetadataObject, RelationCandidate]]
     ) -> int:
-        """Resolve and persist only candidates whose target already exists."""
+        """Resolve and persist relation candidates.
+
+        Informatica mapping relations are emitted with mapping-level names
+        (for example ``SVELAH::sc_PDK``), while the persisted definition is
+        scoped below the session (``...::s_m_FPDK::sc_PDK``).  Resolve that
+        provider shorthand through the session that executes the mapping so
+        source/target definitions are not silently dropped.
+        """
         count = 0
-        objects_by_identity: dict[tuple[str, str], MetadataObject] = {}
-        objects_by_name: dict[str, MetadataObject] = {}
+        objects_by_identity: dict[tuple[str, tuple[str, ...]], MetadataObject] = {}
+        objects_by_name: dict[tuple[str, ...], MetadataObject] = {}
         for metadata_object in self.find_objects():
             objects_by_identity.setdefault(
-                (metadata_object.system_name, metadata_object.qualified_name),
+                (
+                    metadata_object.system_name,
+                    normalize_identifier(metadata_object.qualified_name),
+                ),
                 metadata_object,
             )
-            objects_by_name.setdefault(metadata_object.qualified_name, metadata_object)
+            objects_by_name.setdefault(
+                normalize_identifier(metadata_object.qualified_name), metadata_object
+            )
+
+        def final_identifier(value: str) -> tuple[str, ...]:
+            normalized = normalize_identifier(value)
+            if not normalized:
+                return ()
+            # ``normalize_identifier`` deliberately treats Informatica's
+            # ``::`` namespace separator like a qualification separator.
+            # Relation resolution still needs the final Informatica component
+            # (for example ``...::sc_PDK``), not the whole flattened token.
+            return (normalized[-1].rsplit("::", 1)[-1],)
+
+        # Build this from both persisted and current candidates.  During a
+        # scan the EXECUTES edge and the mapping data edges are submitted in
+        # one batch, so relying only on already persisted edges loses the
+        # context needed to resolve the latter.
+        mapping_sessions: dict[UUID, list[MetadataObject]] = {}
+        for relation in self.find_relations():
+            if relation.relation_type is not RelationType.EXECUTES:
+                continue
+            session = next(
+                (
+                    item
+                    for item in objects_by_name.values()
+                    if item.object_id == relation.source_object_id
+                    and item.object_type is ObjectType.SESSION
+                ),
+                None,
+            )
+            mapping = next(
+                (
+                    item
+                    for item in objects_by_name.values()
+                    if item.object_id == relation.target_object_id
+                    and item.object_type is ObjectType.MAPPING
+                ),
+                None,
+            )
+            if session is not None and mapping is not None:
+                mapping_sessions.setdefault(mapping.object_id, []).append(session)
+
+        def exact(value: str) -> MetadataObject | None:
+            return objects_by_name.get(normalize_identifier(value))
+
+        def resolve_endpoint(
+            value: str,
+            related_mapping: MetadataObject | None = None,
+        ) -> MetadataObject | None:
+            resolved = exact(value)
+            if resolved is not None or related_mapping is None:
+                return resolved
+            wanted = final_identifier(value)
+            matches: list[MetadataObject] = []
+            for session in mapping_sessions.get(related_mapping.object_id, []):
+                prefix = normalize_identifier(session.qualified_name)
+                for item in objects_by_name.values():
+                    qualified = normalize_identifier(item.qualified_name)
+                    if (
+                        item.object_id != session.object_id
+                        and qualified[:-1] == prefix
+                        and final_identifier(item.qualified_name) == wanted
+                    ):
+                        matches.append(item)
+            unique = {item.object_id: item for item in matches}
+            return next(iter(unique.values())) if len(unique) == 1 else None
+
         existing_edges = {
             (
                 relation.source_object_id,
@@ -556,20 +673,85 @@ class MetadataRepository:
             )
             for relation in self.find_relations()
         }
+        superseded_execute_pairs: set[tuple[UUID, UUID]] = set()
+        delete_execute_query = sql.SQL(
+            "DELETE FROM {} WHERE from_object_id = %s AND to_object_id = %s "
+            "AND relation_type = %s"
+        ).format(self._relation_table_identifier)
         insert_query = sql.SQL(
             "INSERT INTO {} (relation_id, from_object_id, to_object_id, "
             "relation_type, source_type, created_at) VALUES (%s,%s,%s,%s,%s,%s)"
         ).format(self._relation_table_identifier)
         inserts: list[tuple[str, str, str, str, str, datetime]] = []
         try:
+            resolved: list[
+                tuple[MetadataObject, RelationCandidate, MetadataObject, MetadataObject]
+            ] = []
             for source, candidate in candidates:
+                if candidate.relation_type is not RelationType.EXECUTES:
+                    continue
+                source_object = objects_by_identity.get(
+                    (
+                        source.system_name,
+                        normalize_identifier(candidate.source_qualified_name),
+                    )
+                ) or exact(candidate.source_qualified_name)
                 target = objects_by_identity.get(
-                    (source.system_name, candidate.target_qualified_name)
-                ) or objects_by_name.get(candidate.target_qualified_name)
-                if target is None:
+                    (
+                        source.system_name,
+                        normalize_identifier(candidate.target_qualified_name),
+                    )
+                ) or exact(candidate.target_qualified_name)
+                if (
+                    source_object is not None
+                    and target is not None
+                    and source_object.object_type is ObjectType.SESSION
+                    and target.object_type is ObjectType.MAPPING
+                ):
+                    mapping_sessions.setdefault(target.object_id, []).append(
+                        source_object
+                    )
+
+            for source, candidate in candidates:
+                source_object = objects_by_identity.get(
+                    (
+                        source.system_name,
+                        normalize_identifier(candidate.source_qualified_name),
+                    )
+                ) or exact(candidate.source_qualified_name)
+                related_mapping = (
+                    source_object
+                    if source_object and source_object.object_type is ObjectType.MAPPING
+                    else None
+                )
+                target = objects_by_identity.get(
+                    (
+                        source.system_name,
+                        normalize_identifier(candidate.target_qualified_name),
+                    )
+                ) or resolve_endpoint(candidate.target_qualified_name, related_mapping)
+                if source_object is None or target is None:
+                    continue
+                if source_object.object_id == target.object_id:
+                    continue
+                resolved.append((source, candidate, source_object, target))
+            # A PRECEDES edge supersedes the generic session->mapping EXECUTES
+            # edge.  Determine this over the complete batch, independent of
+            # parser candidate ordering.
+            for _, candidate, source_object, target in resolved:
+                pair = (source_object.object_id, target.object_id)
+                if candidate.relation_type is RelationType.PRECEDES:
+                    superseded_execute_pairs.add(pair)
+
+            for _, candidate, source_object, target in resolved:
+                pair = (source_object.object_id, target.object_id)
+                if (
+                    candidate.relation_type is RelationType.EXECUTES
+                    and pair in superseded_execute_pairs
+                ):
                     continue
                 edge = (
-                    source.object_id,
+                    source_object.object_id,
                     target.object_id,
                     str(candidate.relation_type),
                     candidate.source_type,
@@ -581,7 +763,7 @@ class MetadataRepository:
                 inserts.append(
                     (
                         str(uuid4()),
-                        str(source.object_id),
+                        str(source_object.object_id),
                         str(target.object_id),
                         edge[2],
                         edge[3],
@@ -589,6 +771,14 @@ class MetadataRepository:
                     )
                 )
             with self._connection.cursor() as cursor:
+                if superseded_execute_pairs:
+                    cursor.executemany(
+                        delete_execute_query,
+                        [
+                            (str(source_id), str(target_id), str(RelationType.EXECUTES))
+                            for source_id, target_id in superseded_execute_pairs
+                        ],
+                    )
                 if inserts:
                     cursor.executemany(insert_query, inserts)
                     self._observe("relation_insert", len(inserts))

@@ -220,6 +220,9 @@ def run_scan(
         print("  None")
     print(f"Report written to: {report_path}")
     print()
+    if failures or persistence_result.objects_failed:
+        print("Failed.")
+        return 1
     print("Success.")
     return 0
 

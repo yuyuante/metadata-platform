@@ -22,6 +22,15 @@ _DEFINITION_TYPES = frozenset(
 
 
 _INFORMATICA_PREFIXES = ("sc_svel_", "sc_", "svel_", "src_", "tgt_")
+_INFORMATICA_SUFFIXES = (
+    "_insert",
+    "_delete",
+    "_update",
+    "_upsert",
+    "_ins",
+    "_del",
+    "_upd",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,16 +144,46 @@ class MetadataIntegrationService:
 
     @staticmethod
     def _definition_keys(definition: MetadataObject) -> set[tuple[str, ...]]:
-        values = {definition.name, definition.qualified_name}
-        values.update(
-            property_item.property_value or ""
-            for property_item in definition.properties
-            if property_item.property_name.lower()
-            in {"tablename", "table_name", "source_name", "target_name"}
-        )
+        properties = {
+            item.property_name.casefold(): item.property_value or ""
+            for item in definition.properties
+        }
+        authoritative_values = {
+            value
+            for name, value in properties.items()
+            if name in {"tablename", "table_name", "source_name", "target_name"}
+            and value
+        }
+        attribute_name = properties.get("attribute.name", "").casefold()
+        attribute_value = properties.get("attribute.value", "")
+        if "table name" in attribute_name and attribute_value:
+            authoritative_values.add(attribute_value)
+
+        owner = properties.get("ownername", "")
+        physical_name = properties.get("name", "")
+        if owner and physical_name:
+            authoritative_values.add(f"{owner}.{physical_name}")
+
+        if authoritative_values:
+            authoritative_keys: set[tuple[str, ...]] = set()
+            for value in authoritative_values:
+                parts = normalize_identifier(value)
+                if not parts:
+                    continue
+                if len(parts) >= 2:
+                    authoritative_keys.add(parts)
+                    authoritative_keys.add(parts[-2:])
+                else:
+                    authoritative_keys.add(parts)
+            return authoritative_keys
+
         keys: set[tuple[str, ...]] = set()
-        for value in values:
-            keys.update(suffix_identity_keys(value, _INFORMATICA_PREFIXES))
+        for value in {definition.name}:
+            keys.update(
+                suffix_identity_keys(
+                    value, _INFORMATICA_PREFIXES, _INFORMATICA_SUFFIXES
+                )
+            )
         return keys
 
     @staticmethod

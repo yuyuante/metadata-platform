@@ -5,15 +5,19 @@ EMIP 是一個可擴充的中繼資料平台，用於探索、解析、正規化
 
 ## Project Overview / 專案概覽
 
-EMIP provides a canonical metadata model and a staged processing flow so scanners and parsers remain independent from persistence. The first release provides a Greenplum-backed vertical slice for SQL DDL files.
-EMIP 提供標準化的中繼資料模型與分階段處理流程，使掃描器和解析器能與資料保存機制解耦。第一個版本提供以 Greenplum 為後端的 SQL DDL 檔案垂直切片。
+EMIP provides a canonical metadata model and a staged processing flow so scanners and parsers remain independent from persistence. It supports SQL DDL and Informatica PowerCenter XML metadata, integrates both providers into one repository graph, and exposes repository-only developer queries.
+EMIP 提供標準化的中繼資料模型與分階段處理流程，使掃描器和解析器能與資料保存機制解耦。目前支援 SQL DDL 與 Informatica PowerCenter XML 中繼資料，將兩種 Provider 整合至同一 Repository Graph，並提供只查詢 Repository 的開發者命令列工具。
 
 ## Features / 功能
 
 - Recursive folder scanning with deterministic ordering / 遞迴掃描資料夾並維持確定性排序
 - Canonical `MetadataObject` domain model / 標準化的 `MetadataObject` 領域模型
 - SQL DDL parsing through SQLGlot AST / 透過 SQLGlot AST 解析 SQL DDL
-- Parser dispatch for supported SQL files / 對支援的 SQL 檔案進行解析器分派
+- Informatica PowerCenter XML workflow and mapping metadata parsing / 解析 Informatica PowerCenter XML Workflow 與 Mapping 中繼資料
+- Cross-provider physical-object identity resolution / 跨 Provider 實體物件識別
+- Repository-only object, workflow, impact, dependency, and path queries / 只透過 Repository 執行物件、Workflow、影響、相依性與路徑查詢
+- Optional reusable scan profiling with `--profile` / 以 `--profile` 啟用可重用的選擇性掃描效能分析
+- Parser dispatch for supported SQL and XML files / 對支援的 SQL 與 XML 檔案進行解析器分派
 - Greenplum metadata repository and CRUD persistence / Greenplum 中繼資料儲存庫與 CRUD 保存功能
 - Command-line scanning with `python -m emip scan <folder>` / 支援以 `python -m emip scan <folder>` 執行命令列掃描
 - Ruff, Black, MyPy, pytest, and GitHub Actions CI / 使用 Ruff、Black、MyPy、pytest 及 GitHub Actions CI
@@ -29,7 +33,9 @@ FolderMetadataScanner
   ↓
 ParserDispatcher
   ↓
-SqlDdlParser
+SqlDdlParser / InformaticaXmlParser
+  ↓
+MetadataIntegration
   ↓
 MetadataPersister
   ↓
@@ -166,8 +172,8 @@ uv run mypy src
 
 **v0.1.0 — Initial release / 初始版本**
 
-The release provides the first executable scanner-to-Greenplum SQL metadata flow and a generic object-level metadata relationship graph.
-此版本提供第一個可執行的「掃描器至 Greenplum SQL 中繼資料」流程，以及通用的物件層級中繼資料關係圖。
+The current implementation provides production SQL and Informatica XML scans, cross-provider metadata integration, optional profiling, and a repository-only developer query engine.
+目前實作提供生產 SQL 與 Informatica XML 掃描、跨 Provider 中繼資料整合、選擇性效能分析，以及只查詢 Repository 的開發者查詢引擎。
 
 ## Developer Query Examples
 
@@ -185,12 +191,14 @@ python -m emip query path CUSTOMER ACCOUNT
 python -m emip query search customer --json
 ```
 
+`object` performs an exact object lookup. Use `search` for partial matches,
+case-insensitive matching, or wildcards such as `*STK*`.
+
 ## Current Limitations / 目前限制
 
-- Only SQL DDL parsing is implemented / 目前僅實作 SQL DDL 解析
 - Unsupported file types are skipped by the dispatcher / 不支援的檔案類型會由分派器略過
 - Column-level lineage and impact analysis are not implemented / 尚未實作欄位層級血緣與影響分析
-- Workflow, Java, Python, and other language parsers are not implemented / 尚未實作 Workflow、Java、Python 與其他語言的解析器
+- Java, Python, and other source-language parsers are not implemented / 尚未實作 Java、Python 與其他原始碼語言解析器
 - Incremental scanning and version persistence are not implemented / 尚未實作增量掃描與版本保存
 - REST API, MCP Server, AI, PII detection, and UI are not implemented / 尚未實作 REST API、MCP Server、AI、PII 偵測與使用者介面
 - Greenplum configuration must be available to persist metadata / 保存中繼資料時必須提供 Greenplum 設定
@@ -201,7 +209,7 @@ python -m emip query search customer --json
 - Parser and scanner plugin hardening / 強化解析器與掃描器外掛機制
 - Incremental scan and version history / 增量掃描與版本歷史
 - Additional SQL dialect support / 支援更多 SQL 方言
-- Informatica and source-code parsers / Informatica 與原始碼解析器
+- Additional source-code parsers / 更多原始碼解析器
 - Column lineage and impact analysis / 欄位血緣與影響分析
 - REST API and MCP Server / REST API 與 MCP Server
 - PII metadata and AI-ready services / PII 中繼資料與 AI 就緒服務

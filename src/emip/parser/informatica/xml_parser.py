@@ -132,14 +132,49 @@ class InformaticaMetadataParser:
         mappings = {
             _attr(item, "NAME", ""): item for item in _children(folder, "MAPPING")
         }
+        sessions = {
+            _attr(item, "NAME", ""): item
+            for item in folder.iter()
+            if _name(item) == "SESSION" and _attr(item, "NAME", "")
+        }
+        task_definitions = {
+            _attr(item, "NAME", ""): item
+            for item in folder.iter()
+            if _name(item) == "TASK" and _attr(item, "NAME", "")
+        }
+        mapping_aliases = {
+            _attr(item, "NAME", ""): self._qn(
+                _attr(item, "FOLDERNAME", folder_qn),
+                _attr(item, "REFOBJECTNAME", ""),
+            )
+            for item in folder.iter()
+            if _name(item) == "SHORTCUT"
+            and _attr(item, "NAME", "")
+            and _attr(item, "REFOBJECTNAME", "")
+        }
         for mapping in mappings.values():
             result.extend(self._mapping(folder_qn, mapping))
         for workflow in _children(folder, "WORKFLOW"):
-            result.extend(self._workflow(folder_qn, workflow, mappings))
+            result.extend(
+                self._workflow(
+                    folder_qn,
+                    workflow,
+                    mappings,
+                    sessions,
+                    mapping_aliases,
+                    task_definitions,
+                )
+            )
         return result
 
     def _workflow(
-        self, folder_qn: str, workflow: ET.Element, mappings: dict[str, ET.Element]
+        self,
+        folder_qn: str,
+        workflow: ET.Element,
+        mappings: dict[str, ET.Element],
+        sessions: dict[str, ET.Element],
+        mapping_aliases: dict[str, str],
+        task_definitions: dict[str, ET.Element],
     ) -> list[MetadataObject]:
         name = _attr(workflow, "NAME", "UNKNOWN_WORKFLOW")
         workflow_qn = self._qn(folder_qn, name)
@@ -151,16 +186,25 @@ class InformaticaMetadataParser:
                     ObjectType.SCHEDULER, workflow_qn, child, "NAME"
                 )
                 result.append(scheduler)
-                result[0].relation_candidates += (
-                    self._relation(
-                        workflow_qn,
-                        scheduler.qualified_name,
-                        RelationType.BELONGS_TO,
-                        child,
-                    ),
-                )
+                if scheduler.qualified_name != workflow_qn:
+                    result[0].relation_candidates += (
+                        self._relation(
+                            workflow_qn,
+                            scheduler.qualified_name,
+                            RelationType.BELONGS_TO,
+                            child,
+                        ),
+                    )
             elif tag in {"TASK", "SESSION"}:
-                result.extend(self._task(workflow_qn, folder_qn, child, mappings))
+                result.extend(
+                    self._task(
+                        workflow_qn,
+                        folder_qn,
+                        child,
+                        mappings,
+                        mapping_aliases,
+                    )
+                )
             elif tag == "WORKFLOWVARIABLE":
                 result.append(
                     self._child(workflow_qn, child, ObjectType.WORKFLOW_VARIABLE)
@@ -170,6 +214,20 @@ class InformaticaMetadataParser:
                     self._child(workflow_qn, child, ObjectType.WORKFLOW_ATTRIBUTE)
                 )
         by_qn = {item.qualified_name: item for item in result}
+        for task_instance in _children(workflow, "TASKINSTANCE"):
+            instance_objects = self._task_instance(
+                workflow_qn,
+                folder_qn,
+                task_instance,
+                mappings,
+                sessions,
+                mapping_aliases,
+                task_definitions,
+            )
+            for item in instance_objects:
+                if item.qualified_name not in by_qn:
+                    result.append(item)
+                    by_qn[item.qualified_name] = item
         for link in _children(workflow, "WORKFLOWLINK"):
             source_name = _attr(link, "FROMTASK", "")
             target_name = _attr(link, "TOTASK", "")
@@ -180,10 +238,96 @@ class InformaticaMetadataParser:
                 and target_name
                 and source_qn in by_qn
                 and target_qn in by_qn
+                and source_qn != target_qn
             ):
                 by_qn[source_qn].relation_candidates += (
-                    self._relation(source_qn, target_qn, RelationType.EXECUTES, link),
+                    self._relation(source_qn, target_qn, RelationType.PRECEDES, link),
                 )
+        return result
+
+    def _task_instance(
+        self,
+        workflow_qn: str,
+        folder_qn: str,
+        task_instance: ET.Element,
+        mappings: dict[str, ET.Element],
+        sessions: dict[str, ET.Element],
+        mapping_aliases: dict[str, str],
+        task_definitions: dict[str, ET.Element],
+    ) -> list[MetadataObject]:
+        """Materialize workflow nodes represented only by TASKINSTANCE elements."""
+        name = _attr(
+            task_instance,
+            "NAME",
+            _attr(task_instance, "TASKNAME", "UNKNOWN_TASK"),
+        )
+        raw_type = _attr(task_instance, "TASKTYPE", "WORKLET").upper().replace(" ", "")
+        object_type = {
+            "COMMAND": ObjectType.COMMAND,
+            "DECISION": ObjectType.DECISION,
+            "EVENTWAIT": ObjectType.EVENT_WAIT,
+            "WORKLET": ObjectType.WORKLET,
+            "EMAIL": ObjectType.EMAIL,
+            "TIMER": ObjectType.TIMER,
+            "START": ObjectType.START_TASK,
+            "SESSION": ObjectType.SESSION,
+            "ASSIGNMENT": ObjectType.WORKLET,
+        }.get(raw_type, ObjectType.WORKLET)
+        task_qn = self._qn(workflow_qn, name)
+        definition = task_definitions.get(_attr(task_instance, "TASKNAME", name))
+        if definition is None:
+            # Command tasks can be represented by a reusable session
+            # TASKINSTANCE whose TASKNAME points at the session component,
+            # while the TASKINSTANCE NAME points at the actual Command task.
+            # Prefer the named task definition when the session name has no
+            # matching definition.
+            definition = task_definitions.get(name)
+        if (
+            definition is not None
+            and _attr(definition, "TYPE", "").upper() == "COMMAND"
+        ):
+            object_type = ObjectType.COMMAND
+        item = self._object(object_type, task_qn, definition or task_instance, "NAME")
+        item.relation_candidates += (
+            self._relation(
+                workflow_qn, task_qn, RelationType.BELONGS_TO, task_instance
+            ),
+        )
+        result = [item]
+        if object_type == ObjectType.SESSION:
+            session_definition = sessions.get(_attr(task_instance, "TASKNAME", name))
+            mapping_name = (
+                _attr(session_definition, "MAPPINGNAME", "")
+                if session_definition is not None
+                else ""
+            )
+            mapping_target = mapping_aliases.get(mapping_name)
+            if mapping_target is None and mapping_name in mappings:
+                mapping_target = self._qn(folder_qn, mapping_name)
+            if mapping_target:
+                item.relation_candidates += (
+                    self._relation(
+                        task_qn,
+                        mapping_target,
+                        RelationType.EXECUTES,
+                        task_instance,
+                    ),
+                )
+            # A reusable session's TASKINSTANCE usually contains only the
+            # workflow placement.  Its transformations and connection
+            # references live on the reusable SESSION definition, so
+            # materialize those children under the workflow task as well.
+            if session_definition is not None:
+                result.extend(self._session_children(task_qn, session_definition, item))
+        if object_type == ObjectType.COMMAND and definition is not None:
+            for command in _children(definition, "VALUEPAIR"):
+                child = self._child(task_qn, command, ObjectType.FILE, "NAME")
+                item.relation_candidates += (
+                    self._relation(
+                        task_qn, child.qualified_name, RelationType.BELONGS_TO, command
+                    ),
+                )
+                result.append(child)
         return result
 
     def _task(
@@ -192,6 +336,7 @@ class InformaticaMetadataParser:
         folder_qn: str,
         task: ET.Element,
         mappings: dict[str, ET.Element],
+        mapping_aliases: dict[str, str] | None = None,
     ) -> list[MetadataObject]:
         name = _attr(task, "NAME", "UNKNOWN_TASK")
         raw_type = (
@@ -211,17 +356,21 @@ class InformaticaMetadataParser:
         }.get(raw_type, ObjectType.WORKLET)
         task_qn = self._qn(workflow_qn, name)
         item = self._object(object_type, task_qn, task, "NAME")
-        item.relation_candidates += (
-            self._relation(workflow_qn, task_qn, RelationType.BELONGS_TO, task),
-        )
+        if task_qn != workflow_qn:
+            item.relation_candidates += (
+                self._relation(workflow_qn, task_qn, RelationType.BELONGS_TO, task),
+            )
         result = [item]
         if object_type == ObjectType.SESSION:
             mapping_name = _attr(task, "MAPPINGNAME", "")
-            if mapping_name in mappings:
+            mapping_target = (mapping_aliases or {}).get(mapping_name)
+            if mapping_target is None and mapping_name in mappings:
+                mapping_target = self._qn(folder_qn, mapping_name)
+            if mapping_target:
                 item.relation_candidates += (
                     self._relation(
                         task_qn,
-                        self._qn(folder_qn, mapping_name),
+                        mapping_target,
                         RelationType.EXECUTES,
                         task,
                     ),
@@ -229,7 +378,13 @@ class InformaticaMetadataParser:
             result.extend(self._session_children(task_qn, task, item))
         elif object_type == ObjectType.COMMAND:
             for command in _children(task, "VALUEPAIR"):
-                result.append(self._child(task_qn, command, ObjectType.FILE, "NAME"))
+                child = self._child(task_qn, command, ObjectType.FILE, "NAME")
+                item.relation_candidates += (
+                    self._relation(
+                        task_qn, child.qualified_name, RelationType.BELONGS_TO, command
+                    ),
+                )
+                result.append(child)
         return result
 
     def _session_children(
@@ -246,10 +401,60 @@ class InformaticaMetadataParser:
             "LOOKUP PROCEDURE": ObjectType.LOOKUP,
             "UPDATE STRATEGY": ObjectType.UPDATE_STRATEGY,
         }
+        extensions = _children(session, "SESSIONEXTENSION")
+        connection_by_instance: dict[str, str] = {}
+        for extension in extensions:
+            connection = next(
+                (
+                    prop.property_value
+                    for prop in _properties(extension)
+                    if prop.property_name == "connectionreference.connectionname"
+                ),
+                "",
+            )
+            instance_name = _attr(extension, "SINSTANCENAME", "")
+            if connection and instance_name:
+                connection_by_instance[instance_name] = connection
+
         for transformation in _children(session, "SESSTRANSFORMATIONINST"):
             kind = types.get(_attr(transformation, "TRANSFORMATIONTYPE", "").upper())
             if kind is not None:
                 child = self._child(session_qn, transformation, kind, "SINSTANCENAME")
+                connection = connection_by_instance.get(
+                    _attr(transformation, "SINSTANCENAME", "")
+                )
+                if not connection:
+                    connection = _source_connection(
+                        transformation, extensions, connection_by_instance
+                    )
+                if connection:
+                    child.properties = child.properties + (
+                        ObjectProperty(
+                            property_name="connectionreference.connectionname",
+                            property_value=connection,
+                        ),
+                    )
+                if kind is ObjectType.TARGET_DEFINITION:
+                    writer_properties: list[ObjectProperty] = []
+                    for extension in extensions:
+                        if (
+                            _attr(extension, "SINSTANCENAME", "")
+                            != _attr(transformation, "SINSTANCENAME", "")
+                            or "writer" not in _attr(extension, "NAME", "").lower()
+                        ):
+                            continue
+                        for attribute in _children(extension, "ATTRIBUTE"):
+                            attribute_name = _attr(attribute, "NAME", "").strip()
+                            attribute_value = _attr(attribute, "VALUE", "")
+                            if attribute_name:
+                                property_name = "_".join(attribute_name.lower().split())
+                                writer_properties.append(
+                                    ObjectProperty(
+                                        property_name=f"file_writer.{property_name}",
+                                        property_value=attribute_value,
+                                    )
+                                )
+                    child.properties = child.properties + tuple(writer_properties)
                 result.append(child)
                 session_item.relation_candidates += (
                     self._relation(
@@ -270,7 +475,7 @@ class InformaticaMetadataParser:
                         partition,
                     ),
                 )
-        for extension in _children(session, "SESSIONEXTENSION"):
+        for extension in extensions:
             child = self._child(session_qn, extension, ObjectType.CONNECTION)
             result.append(child)
             session_item.relation_candidates += (
@@ -411,6 +616,22 @@ def _children(element: ET.Element, name: str) -> list[ET.Element]:
 
 def _attr(element: ET.Element, name: str, default: str) -> str:
     return element.attrib.get(name, default)
+
+
+def _source_connection(
+    transformation: ET.Element,
+    extensions: list[ET.Element],
+    connection_by_instance: dict[str, str],
+) -> str:
+    """Resolve a source definition through its source-qualifier reader extension."""
+
+    instance_name = _attr(transformation, "SINSTANCENAME", "")
+    for extension in extensions:
+        if _attr(extension, "SINSTANCENAME", "") != instance_name:
+            continue
+        source_qualifier = _attr(extension, "DSQINSTNAME", "")
+        return connection_by_instance.get(source_qualifier, "")
+    return ""
 
 
 def _properties(element: ET.Element) -> tuple[ObjectProperty, ...]:

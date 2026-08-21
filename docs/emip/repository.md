@@ -22,6 +22,13 @@ as `sc_`, `sc_svel_`, `src_`, and `tgt_`.  For example, `STKOUT`,
 `[dbo].[STKOUT]`, `"dbo"."STKOUT"`, and an Informatica definition ending in
 `sc_STKOUT` can resolve to the physical SQL object `dbo.STKOUT`.
 
+Informatica target names may append one explicitly supported operation suffix:
+`_INSERT`, `_DELETE`, `_UPDATE`, `_UPSERT`, `_INS`, `_DEL`, or `_UPD`.
+The suffix is removed only for identity matching; arbitrary suffixes are never
+stripped. Qualified table evidence from properties such as table name and owner
+takes precedence over definition-name inference. A qualified identity does not
+fall back across schemas, and an ambiguous candidate is left unresolved.
+
 ### Merge strategy
 
 Duplicate physical identities are merged before persistence.  The first
