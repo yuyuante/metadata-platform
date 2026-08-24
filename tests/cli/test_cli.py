@@ -20,6 +20,11 @@ class InMemoryPersister:
         return PersistenceResult(len(objects), 0, 0)
 
 
+class FailingPersister:
+    def persist(self, objects: list[MetadataObject]) -> PersistenceResult:
+        return PersistenceResult(0, 0, len(objects))
+
+
 def test_run_scan_persists_objects_and_prints_summary(
     tmp_path: Path, capsys: object
 ) -> None:
@@ -99,6 +104,27 @@ def test_run_scan_returns_one_for_missing_folder(
     assert "Folder not found:" in capsys.readouterr().out  # type: ignore[attr-defined]
 
 
+def test_run_scan_returns_one_when_repository_persistence_fails(
+    tmp_path: Path, capsys: object
+) -> None:
+    (tmp_path / "customer.sql").write_text(
+        "CREATE TABLE sales.customer (id INT);", encoding="utf-8"
+    )
+
+    exit_code = run_scan(
+        tmp_path,
+        scanner=FolderScanner(),
+        metadata_scanner=FolderMetadataScanner(),
+        persister=cast(MetadataObjectPersister, FailingPersister()),
+        report_dir=tmp_path / "scan-report",
+    )
+
+    output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert exit_code == 1
+    assert "Objects failed   : 1" in output
+    assert output.rstrip().endswith("Failed.")
+
+
 def test_run_scan_lists_files_with_multiple_objects(
     tmp_path: Path, capsys: object
 ) -> None:
@@ -123,3 +149,25 @@ def test_run_scan_lists_files_with_multiple_objects(
     assert len(persister.objects) == 2
     assert "Files with multiple objects:" in output
     assert f"{sql_path} : 2 objects" in output
+
+
+def test_run_scan_lists_files_with_dynamic_sql(tmp_path: Path, capsys: object) -> None:
+    sql_path = tmp_path / "dynamic.sql"
+    sql_path.write_text(
+        "CREATE PROCEDURE sales.refresh AS EXEC('SELECT * FROM sales.customer');",
+        encoding="utf-8",
+    )
+    persister = InMemoryPersister()
+
+    exit_code = run_scan(
+        tmp_path,
+        scanner=FolderScanner(),
+        metadata_scanner=FolderMetadataScanner(),
+        persister=cast(MetadataObjectPersister, persister),
+        report_dir=tmp_path / "scan-report",
+    )
+
+    output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert "Files with dynamic SQL:" in output
+    assert f"{sql_path} : RESOLVED: 1 objects" in output

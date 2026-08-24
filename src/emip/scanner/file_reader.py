@@ -1,6 +1,8 @@
 """Read SQL files using the supported production encoding fallbacks."""
 
 from pathlib import Path
+from time import perf_counter
+from typing import Any
 
 _TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "cp950", "big5")
 _UTF16_ENCODINGS = ("utf-8-sig", "utf-8", "cp950", "big5", "utf-16")
@@ -42,10 +44,17 @@ def _repair_utf16_bytes(content: bytes) -> bytes:
 class FileReader:
     """Read SQL source text without external encoding detection libraries."""
 
+    def __init__(self, profiler: Any | None = None) -> None:
+        self._profiler = profiler
+
     def read(self, path: Path) -> str:
         """Read ``path`` using the required ordered encoding fallbacks."""
 
+        started_at = perf_counter()
         content = path.read_bytes()
+        if self._profiler is not None:
+            self._profiler.record("File reading", perf_counter() - started_at)
+        encoding_started_at = perf_counter()
         if content.startswith(_PG_CUSTOM_DUMP_MAGIC):
             raise UnsupportedInputError(path)
         is_utf16 = content.startswith((b"\xff\xfe", b"\xfe\xff"))
@@ -54,6 +63,7 @@ class FileReader:
             try:
                 decoded = repaired.decode("utf-16")
                 if len(decoded) > 1:
+                    self._record_encoding(encoding_started_at)
                     return decoded
             except UnicodeDecodeError:
                 pass
@@ -64,14 +74,20 @@ class FileReader:
                 decoded = content.decode(encoding)
                 if encoding == "utf-16" and len(decoded) <= 1:
                     continue
+                self._record_encoding(encoding_started_at)
                 return decoded
             except UnicodeDecodeError as exc:
                 errors.append(exc)
         if is_utf16:
             decoded = repaired.decode("utf-16", errors="replace")
             if len(decoded) > 1:
+                self._record_encoding(encoding_started_at)
                 return decoded
         raise EncodingReadError(path, errors)
+
+    def _record_encoding(self, started_at: float) -> None:
+        if self._profiler is not None:
+            self._profiler.record("Encoding detection", perf_counter() - started_at)
 
     def read_text(self, path: Path) -> str:
         """Alias for ``read`` for file-reader compatibility."""

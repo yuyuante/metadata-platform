@@ -13,7 +13,7 @@ def _utc_now() -> datetime:
 
 
 class RelationType(StrEnum):
-    """Built-in dependency and containment relationship categories."""
+    """Built-in dependency, execution, and containment relationship categories."""
 
     READS = "READS"
     WRITES = "WRITES"
@@ -22,6 +22,7 @@ class RelationType(StrEnum):
     IMPORTS = "IMPORTS"
     EXPORTS = "EXPORTS"
     EXECUTES = "EXECUTES"
+    PRECEDES = "PRECEDES"
     DEPENDS_ON = "DEPENDS_ON"
     BELONGS_TO = "BELONGS_TO"
     GENERATES = "GENERATES"

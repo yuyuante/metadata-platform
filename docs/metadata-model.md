@@ -8,7 +8,7 @@ The metadata model is the canonical, database-independent language shared by sca
 - **ObjectVersion** records an append-only snapshot reference, including a content hash and source location. Older versions are retained; current state is indicated by `is_current`.
 - **ObjectProperty** stores extensible key/value metadata such as encoding, delimiter, file format, database name, language version, or charset.
 - **Column** represents a column belonging to a table, file, or another column-bearing object.
-- **Relation** represents a typed object dependency such as `READS`, `WRITES`, `CALLS`, `IMPORTS`, `EXPORTS`, `LOOKUP`, `GENERATES`, `DEPENDS_ON`, `BELONGS_TO`, or `EXECUTES`.
+- **Relation** represents a typed object dependency such as `READS`, `WRITES`, `CALLS`, `IMPORTS`, `EXPORTS`, `LOOKUP`, `GENERATES`, `DEPENDS_ON`, `BELONGS_TO`, `EXECUTES`, or `PRECEDES`.
 - **ColumnRelation** represents column-level lineage and keeps the initial transformation expression as plain text.
 - **ScanJob**, **ScanTarget**, and **ScanResult** represent scan execution state, input targets, and aggregate results.
 - **Tag** and **ObjectTag** provide reusable labels and many-to-many object tagging.

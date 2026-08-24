@@ -3,8 +3,9 @@ from uuid import uuid4
 
 import psycopg2
 import pytest
+from psycopg2 import sql
 
-from emip.domain import MetadataObject, ObjectStatus, ObjectType
+from emip.domain import Column, MetadataObject, ObjectStatus, ObjectType
 from emip.repository.metadata_repository import MetadataRepository
 
 
@@ -59,3 +60,22 @@ def test_metadata_object_crud_against_greenplum() -> None:
 
     assert repository.delete_object(updated) == updated
     assert not repository.exists_object(updated)
+
+
+def test_insert_columns_uses_parent_object_id_for_foreign_key() -> None:
+    class Cursor:
+        params: list[tuple[object, ...]] = []
+
+        def executemany(self, query: object, params: list[tuple[object, ...]]) -> None:
+            del query
+            self.params = params
+
+    repository = MetadataRepository.__new__(MetadataRepository)
+    repository._column_table_identifier = sql.Identifier("emip_column")
+    cursor = Cursor()
+    parent_id = uuid4()
+    column = Column(object_id=uuid4(), column_name="id")
+
+    repository._insert_columns(cursor, parent_id, (column,))
+
+    assert cursor.params[0][1] == str(parent_id)

@@ -2,6 +2,7 @@
 
 import re
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import sqlglot
@@ -15,6 +16,8 @@ from emip.domain import (
     RelationCandidate,
     RelationType,
 )
+from emip.identity import unquote_identifier
+from emip.parser.dynamic_sql_resolver import DynamicSqlResolver
 
 _SUPPORTED_TYPES: dict[str, ObjectType] = {
     "TABLE": ObjectType.TABLE,
@@ -45,23 +48,36 @@ class UnsupportedSqlSyntaxError(ValueError):
 class SqlDdlParser:
     """Parse supported SQL DDL statements into metadata objects."""
 
+    def __init__(self, profiler: Any | None = None) -> None:
+        self._profiler = profiler
+
     def parse(self, path: Path) -> list[MetadataObject]:
         """Parse supported CREATE statements from a SQL file."""
 
         source = path.read_text(encoding="utf-8")
         mssql_objects = _mssql_objects(path, source)
         if mssql_objects is not None:
-            return _with_relationships(mssql_objects, source)
+            objects = _with_relationships(mssql_objects, source)
+            self._record_profile(objects)
+            return objects
         if _is_create_function(source):
-            return _with_relationships([_function_object(path, source)], source)
+            objects = _with_relationships([_function_object(path, source)], source)
+            self._record_profile(objects)
+            return objects
         if _is_create_procedure(source):
-            return _with_relationships([_procedure_object(path, source)], source)
+            objects = _with_relationships([_procedure_object(path, source)], source)
+            self._record_profile(objects)
+            return objects
         if _is_create_trigger(source):
-            return _with_relationships([_trigger_object(path, source)], source)
+            objects = _with_relationships([_trigger_object(path, source)], source)
+            self._record_profile(objects)
+            return objects
         if _is_create_materialized_view(source):
-            return _with_relationships(
+            objects = _with_relationships(
                 [_materialized_view_object(path, source)], source
             )
+            self._record_profile(objects)
+            return objects
         statements = sqlglot.parse(source, read="postgres")
         if any(isinstance(statement, exp.Command) for statement in statements):
             compatible_source = _remove_greenplum_distribution(source)
@@ -73,7 +89,7 @@ class SqlDdlParser:
                 raise UnsupportedSqlSyntaxError(
                     "Unsupported CREATE TABLE syntax: SQLGlot returned Command."
                 )
-        objects: list[MetadataObject] = []
+        parsed_result: list[MetadataObject] = []
         system_name = path.stem
 
         for statement in statements:
@@ -101,55 +117,38 @@ class SqlDdlParser:
                     statement,
                     metadata_object.object_id,
                 )
-            objects.append(metadata_object)
-        return _with_relationships(objects, source)
+            parsed_result.append(metadata_object)
+        parsed_result = _with_relationships(parsed_result, source)
+        self._record_profile(parsed_result)
+        return parsed_result
+
+    def _record_profile(self, objects: list[MetadataObject]) -> None:
+        if self._profiler is None:
+            return
+        relations = sum(len(item.relation_candidates) for item in objects)
+        self._profiler.count("MetadataObject", len(objects))
+        self._profiler.record("MetadataObject creation", 0.0, len(objects))
+        self._profiler.count("Relation", relations)
+        self._profiler.record("Relation extraction", 0.0, relations)
 
 
 _IDENTIFIER = r"(?:\[[^]]+\]|" + r'"[^" ]+"' + r"|[A-Za-z_#][\w$#@]*)"
 _REF = rf"({_IDENTIFIER}(?:\s*\.\s*{_IDENTIFIER}){{0,2}})"
-_DYNAMIC = re.compile(
-    r"\b(?:EXEC(?:UTE)?\s*\(|EXECUTE\s+IMMEDIATE\b|EXECUTE\s+['\"]|sp_executesql\b|\bEXECUTE\s+[^'\"\s]+\s*\+)",
-    re.I,
-)
-_LITERAL_EXEC = re.compile(
-    r"\b(?:EXEC|EXECUTE)\s*\(\s*(['\"])(.*?)\1\s*\)", re.I | re.S
-)
-_LITERAL_EXECUTE = re.compile(r"\bEXECUTE\s+(['\"])(.*?)\1\s*;?", re.I | re.S)
-_CONSTANT_ASSIGNMENT = re.compile(
-    r"\b(?:DECLARE\s+)?@([A-Za-z_][\w$]*)\b(?:\s+[^=;]+)?\s*=\s*(['\"])(.*?)\2\s*;",
-    re.I | re.S,
-)
+_DYNAMIC_SQL_RESOLVER = DynamicSqlResolver()
 _TRIGGER_UPDATE_OF = re.compile(r"\bUPDATE\s+OF\s+(.+?)\s+ON\b", re.I | re.S)
 
 
-def _resolve_dynamic_sql(source: str) -> str | None:
-    """Return dynamic SQL only when its complete text is a constant literal."""
-
-    literal = _LITERAL_EXEC.search(source) or _LITERAL_EXECUTE.search(source)
-    if literal is not None:
-        return literal.group(2)
-    assignments = {
-        match.group(1).lower(): match.group(3)
-        for match in _CONSTANT_ASSIGNMENT.finditer(source)
-    }
-    variable_exec = re.search(
-        r"\bEXEC(?:UTE)?\s*\(\s*@([A-Za-z_][\w$]*)\s*\)", source, re.I
-    )
-    if variable_exec is not None:
-        return assignments.get(variable_exec.group(1).lower())
-    return None
-
-
 def _clean_ref(value: str) -> str:
-    return ".".join(part.strip().strip('[]"') for part in value.split("."))
+    return ".".join(unquote_identifier(value))
 
 
 def _with_relationships(
     objects: list[MetadataObject], source: str
 ) -> list[MetadataObject]:
     """Attach conservative, evidence-backed relation candidates to parsed objects."""
-    dynamic = _DYNAMIC.search(source) is not None
-    resolved_sql = _resolve_dynamic_sql(source)
+    resolution = _DYNAMIC_SQL_RESOLVER.resolve(source)
+    dynamic = resolution.contains_dynamic_sql
+    resolved_sql = resolution.resolved_sql
     relation_sql = source
     source_type = "STATIC_SQL"
     if dynamic and resolved_sql is not None:
