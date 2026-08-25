@@ -16,6 +16,7 @@ EMIP 提供標準化的中繼資料模型與分階段處理流程，使掃描器
 - Informatica PowerCenter XML workflow and mapping metadata parsing / 解析 Informatica PowerCenter XML Workflow 與 Mapping 中繼資料
 - Cross-provider physical-object identity resolution / 跨 Provider 實體物件識別
 - Repository-only object, workflow, impact, dependency, and path queries / 只透過 Repository 執行物件、Workflow、影響、相依性與路徑查詢
+- Browser-only static Developer Web export / 不需後端服務的靜態 Developer Web 匯出
 - Optional reusable scan profiling with `--profile` / 以 `--profile` 啟用可重用的選擇性掃描效能分析
 - Parser dispatch for supported SQL and XML files / 對支援的 SQL 與 XML 檔案進行解析器分派
 - Greenplum metadata repository and CRUD persistence / Greenplum 中繼資料儲存庫與 CRUD 保存功能
@@ -57,7 +58,8 @@ src/emip/
 ├── parser/         # Parser contracts, dispatch, and SQL DDL parser / 解析器契約、分派與 SQL DDL 解析器
 ├── repository/     # Repository contracts and Greenplum adapters / 儲存庫契約與 Greenplum 配接器
 ├── scanner/        # File discovery and parser integration / 檔案探索與解析器整合
-└── services/       # Application-level pipeline components / 應用程式層級的流程元件
+├── services/       # Application-level pipeline components / 應用程式層級的流程元件
+└── web/            # Static Developer Web exporter and assets / 靜態 Developer Web 匯出器與資產
 
 tests/              # Unit and Greenplum integration tests / 單元測試與 Greenplum 整合測試
 docs/               # Architecture, design, and project guidance / 架構、設計與專案指引
@@ -203,13 +205,29 @@ commands accept `--json`; every flow node can also be queried by its stable UUID
 See [Data Flow and Source Traceability](docs/emip/data-flow.md) for relation
 direction, warning counts, and the stable JSON contract.
 
+## Static Developer Web
+
+Export the existing repository to a partitioned, browser-only site:
+
+```powershell
+python -m emip web export
+python -m emip web export --output web-dist --depth 6
+python -m http.server 8000 --directory web-dist
+```
+
+Then open `http://localhost:8000`. The browser reads only generated JSON files;
+it never connects to Greenplum. The site provides metadata search, object detail,
+source excerpts, and cycle-safe upstream/downstream Data Flow. See
+[Static Developer Web](docs/emip/developer-web.md) for the output contract,
+navigation semantics, and deployment notes.
+
 ## Current Limitations / 目前限制
 
 - Unsupported file types are skipped by the dispatcher / 不支援的檔案類型會由分派器略過
 - Column-level lineage and impact analysis are not implemented / 尚未實作欄位層級血緣與影響分析
 - Java, Python, and other source-language parsers are not implemented / 尚未實作 Java、Python 與其他原始碼語言解析器
 - Incremental scanning and version persistence are not implemented / 尚未實作增量掃描與版本保存
-- REST API, MCP Server, AI, PII detection, and UI are not implemented / 尚未實作 REST API、MCP Server、AI、PII 偵測與使用者介面
+- REST API, MCP Server, AI, PII detection, and server-backed UI are not implemented / 尚未實作 REST API、MCP Server、AI、PII 偵測與伺服器式使用者介面
 - Greenplum configuration must be available to persist metadata / 保存中繼資料時必須提供 Greenplum 設定
 - Coverage reporting is not currently configured / 目前尚未設定覆蓋率報告
 

@@ -105,21 +105,51 @@ class DataFlowService:
         relations: Iterable[Relation],
         depth: int = 6,
     ) -> DataFlow:
+        index = self.prepare(objects, relations, extra_objects=(root,))
+        return index.build(root, depth)
+
+    def prepare(
+        self,
+        objects: Iterable[MetadataObject],
+        relations: Iterable[Relation],
+        *,
+        extra_objects: Iterable[MetadataObject] = (),
+    ) -> DataFlowIndex:
+        """Normalize a repository graph once for multiple bounded projections."""
+
+        return DataFlowIndex((*objects, *extra_objects), relations)
+
+
+class DataFlowIndex:
+    """Reusable, immutable-enough index for exporting many flow roots."""
+
+    def __init__(
+        self, objects: Iterable[MetadataObject], relations: Iterable[Relation]
+    ) -> None:
+        self._by_id = {item.object_id: item for item in objects}
+        self._edges, self._warning_values = self._normalize_edges(
+            self._by_id, relations
+        )
+        self._outgoing: dict[UUID, list[FlowEdge]] = defaultdict(list)
+        self._incoming: dict[UUID, list[FlowEdge]] = defaultdict(list)
+        for edge in self._edges:
+            self._outgoing[UUID(edge.source)].append(edge)
+            self._incoming[UUID(edge.target)].append(edge)
+
+    def build(self, root: MetadataObject, depth: int = 6) -> DataFlow:
+        """Build one bounded projection while preserving DataFlowService semantics."""
+
         if depth < 0:
             raise ValueError("--depth must be non-negative")
-        by_id = {item.object_id: item for item in objects}
-        by_id[root.object_id] = root
-        edges, warning_values = self._normalize_edges(by_id, relations)
-        outgoing: dict[UUID, list[FlowEdge]] = defaultdict(list)
-        incoming: dict[UUID, list[FlowEdge]] = defaultdict(list)
-        for edge in edges:
-            outgoing[UUID(edge.source)].append(edge)
-            incoming[UUID(edge.target)].append(edge)
+        if root.object_id not in self._by_id:
+            raise ValueError(f"Flow root is not present in the graph: {root.object_id}")
 
         downstream, downstream_depths = self._walk(
-            root.object_id, outgoing, True, depth
+            root.object_id, self._outgoing, True, depth
         )
-        upstream, upstream_depths = self._walk(root.object_id, incoming, False, depth)
+        upstream, upstream_depths = self._walk(
+            root.object_id, self._incoming, False, depth
+        )
         included = {root.object_id, *upstream, *downstream}
         depths = {root.object_id: 0}
         for object_id, item_depth in upstream_depths.items():
@@ -128,25 +158,26 @@ class DataFlowService:
             depths[object_id] = min(depths.get(object_id, item_depth), item_depth)
 
         nodes = tuple(
-            self._node(by_id[object_id], depths[object_id])
+            self._node(self._by_id[object_id], depths[object_id])
             for object_id in sorted(
                 included,
                 key=lambda value: (
                     depths[value],
-                    by_id[value].qualified_name.casefold(),
+                    self._by_id[value].qualified_name.casefold(),
                     str(value),
                 ),
             )
         )
         visible_edges = tuple(
             edge
-            for edge in edges
-            if UUID(edge.source) in included and UUID(edge.target) in included
+            for source_id in sorted(included, key=str)
+            for edge in self._outgoing.get(source_id, ())
+            if UUID(edge.target) in included
         )
         warnings = FlowWarnings(
-            dangling_relations=warning_values["dangling_relations"],
-            duplicate_edges=warning_values["duplicate_edges"],
-            self_relations=warning_values["self_relations"],
+            dangling_relations=self._warning_values["dangling_relations"],
+            duplicate_edges=self._warning_values["duplicate_edges"],
+            self_relations=self._warning_values["self_relations"],
             cycles=self._count_cycles(visible_edges),
         )
         return DataFlow(

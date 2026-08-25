@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from xml.etree import ElementTree
 
 from emip.domain import MetadataObject, ObjectType, SourceLocation, SourceType
@@ -42,11 +44,19 @@ class SourceExcerpt:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _XmlSourceIndex:
+    parent_by_element: dict[ElementTree.Element, ElementTree.Element]
+    elements_by_name: dict[str, tuple[ElementTree.Element, ...]]
+
+
 class SourceTraceabilityService:
     """Read source only from locations persisted during scanning."""
 
     def __init__(self, reader: FileReader | None = None) -> None:
         self._reader = reader or FileReader()
+        self._xml_indexes: OrderedDict[Path, _XmlSourceIndex] = OrderedDict()
+        self._xml_index_lock = Lock()
 
     def retrieve(self, item: MetadataObject) -> dict[str, object]:
         locations = sorted(
@@ -99,7 +109,7 @@ class SourceTraceabilityService:
                         )
             else:
                 excerpt = self._xml_context(
-                    text, location.context_identifier, object_type
+                    path, text, location.context_identifier, object_type
                 )
                 if excerpt is None:
                     warning = "XML context could not be resolved reliably."
@@ -119,28 +129,25 @@ class SourceTraceabilityService:
             warning=warning,
         )
 
-    @staticmethod
     def _xml_context(
-        text: str, context: str | None, object_type: ObjectType
+        self,
+        path: Path,
+        text: str,
+        context: str | None,
+        object_type: ObjectType,
     ) -> str | None:
         if not context:
             return None
-        root = ElementTree.fromstring(text)
+        index = self._xml_source_index(path, text)
         context_parts = tuple(part.casefold() for part in context.split("::") if part)
         if not context_parts:
             return None
-        parent_by_element = {
-            child: parent for parent in root.iter() for child in list(parent)
-        }
         ranked: list[tuple[tuple[int, int, int, int], ElementTree.Element]] = []
-        for element in root.iter():
+        for element in index.elements_by_name.get(context_parts[-1], ()):
             type_priority = _object_type_match_priority(element, object_type)
             if type_priority is None:
                 continue
-            name = _element_name(element)
-            if name.casefold() != context_parts[-1]:
-                continue
-            ancestry = _named_ancestry(element, parent_by_element)
+            ancestry = _named_ancestry(element, index.parent_by_element)
             matched_parts = _ordered_match_count(context_parts, ancestry)
             exact_suffix = int(
                 len(ancestry) <= len(context_parts)
@@ -157,6 +164,33 @@ class SourceTraceabilityService:
         if len(best) != 1:
             return None
         return ElementTree.tostring(best[0], encoding="unicode")
+
+    def _xml_source_index(self, path: Path, text: str) -> _XmlSourceIndex:
+        resolved = path.resolve()
+        with self._xml_index_lock:
+            cached = self._xml_indexes.get(resolved)
+            if cached is not None:
+                self._xml_indexes.move_to_end(resolved)
+                return cached
+            root = ElementTree.fromstring(text)
+            parent_by_element = {
+                child: parent for parent in root.iter() for child in list(parent)
+            }
+            grouped: defaultdict[str, list[ElementTree.Element]] = defaultdict(list)
+            for element in root.iter():
+                name = _element_name(element)
+                if name:
+                    grouped[name.casefold()].append(element)
+            index = _XmlSourceIndex(
+                parent_by_element=parent_by_element,
+                elements_by_name={
+                    name: tuple(elements) for name, elements in grouped.items()
+                },
+            )
+            self._xml_indexes[resolved] = index
+            if len(self._xml_indexes) > 8:
+                self._xml_indexes.popitem(last=False)
+            return index
 
 
 def _tag(element: ElementTree.Element) -> str:

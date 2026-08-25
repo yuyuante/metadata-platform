@@ -1,7 +1,9 @@
 from pathlib import Path
 from typing import cast
 
-from emip.cli import _build_parser, run_scan
+from pytest import CaptureFixture
+
+from emip.cli import _build_parser, run_scan, run_web_export
 from emip.domain import MetadataObject
 from emip.repository.metadata_persister import (
     MetadataObjectPersister,
@@ -9,6 +11,7 @@ from emip.repository.metadata_persister import (
 )
 from emip.scanner.folder_metadata_scanner import FolderMetadataScanner
 from emip.scanner.folder_scanner import FolderScanner
+from emip.web import ExportStatistics, StaticWebExporter
 
 
 class InMemoryPersister:
@@ -23,6 +26,17 @@ class InMemoryPersister:
 class FailingPersister:
     def persist(self, objects: list[MetadataObject]) -> PersistenceResult:
         return PersistenceResult(0, 0, len(objects))
+
+
+class RecordingWebExporter:
+    def __init__(self) -> None:
+        self.output: Path | None = None
+        self.depth: int | None = None
+
+    def export(self, output: Path, *, depth: int = 6) -> ExportStatistics:
+        self.output = output
+        self.depth = depth
+        return ExportStatistics(3, 3, 3, 0.25, 2048)
 
 
 def test_query_flow_arguments() -> None:
@@ -42,6 +56,32 @@ def test_query_source_arguments() -> None:
     assert args.query_command == "source"
     assert args.term == "dbo.STKOUT"
     assert args.json is True
+
+
+def test_web_export_arguments() -> None:
+    args = _build_parser().parse_args(
+        ["web", "export", "--output", "published", "--depth", "4"]
+    )
+
+    assert args.command == "web"
+    assert args.web_command == "export"
+    assert args.output == Path("published")
+    assert args.depth == 4
+
+
+def test_run_web_export_prints_profile(capsys: CaptureFixture[str]) -> None:
+    args = _build_parser().parse_args(["web", "export"])
+    exporter = RecordingWebExporter()
+
+    exit_code = run_web_export(args, exporter=cast(StaticWebExporter, exporter))
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert exporter.output == Path("web-dist")
+    assert exporter.depth == 6
+    assert "Objects : 3" in output
+    assert "Elapsed : 0.25 sec" in output
+    assert "Size    : 2048 bytes" in output
 
 
 def test_run_scan_persists_objects_and_prints_summary(

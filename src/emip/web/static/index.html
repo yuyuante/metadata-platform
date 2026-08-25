@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EMIP Developer Web</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header><div><span class="eyebrow">EMIP</span><h1>Developer Web</h1></div><p id="status">Loading metadata…</p></header>
+  <main>
+    <aside class="panel search-panel">
+      <label for="search">Search metadata</label>
+      <input id="search" type="search" placeholder="Name, type, provider…" autocomplete="off">
+      <p class="hint">Case-insensitive partial search. Select a qualified result when names are ambiguous.</p>
+      <ol id="results" class="result-list"></ol>
+    </aside>
+    <section class="panel flow-panel">
+      <div class="panel-heading"><div><span class="eyebrow">Bounded graph</span><h2>Data Flow</h2></div><button id="explore" type="button" disabled>Explore from selection</button></div>
+      <div id="warnings" class="warnings" hidden></div>
+      <div class="flow-columns"><section><h3>Upstream</h3><div id="upstream"></div></section><section><h3>Root</h3><div id="root"></div></section><section><h3>Downstream</h3><div id="downstream"></div></section></div>
+      <h3>Relations</h3><ol id="edges" class="edge-list"></ol>
+    </section>
+    <aside class="panel detail-panel"><span class="eyebrow">Selected object</span><div id="detail"><h2>Choose an object</h2><p>Search or select a node to inspect repository details and persisted source context.</p></div></aside>
+  </main>
+  <script src="app.js" defer></script>
+</body>
+</html>
