@@ -306,6 +306,27 @@ def test_persist_reports_current_object_and_result() -> None:
     assert progress[-1].endswith("created=2, skipped=0, failed=0")
 
 
+def test_persist_throttles_per_object_progress_for_large_scans() -> None:
+    repository = InMemoryMetadataRepository()
+    progress: list[str] = []
+    objects = [_object(f"object_{index}") for index in range(251)]
+
+    result = MetadataObjectPersister(
+        repository=cast(MetadataRepository, repository),
+        progress_callback=progress.append,
+    ).persist(objects)
+
+    assert result.objects_created == 251
+    object_progress = [
+        message for message in progress if message.startswith("Saving [")
+    ]
+    assert len(object_progress) == 8
+    assert any("Saving [1/251] " in message for message in object_progress)
+    assert any("Saving [100/251] " in message for message in object_progress)
+    assert any("Saving [200/251] " in message for message in object_progress)
+    assert any("Saving [251/251] " in message for message in object_progress)
+
+
 def test_classifies_foreign_key_failure() -> None:
     error = type("ForeignKeyViolation", (Exception,), {})("column parent missing")
 

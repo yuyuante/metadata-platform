@@ -32,6 +32,12 @@ STAGES = (
     "Relation extraction",
     "MetadataObject generation",
     "MetadataObject creation",
+    "Metadata integration",
+    "Repository lookup",
+    "Object persistence",
+    "Source-location persistence",
+    "Relation lookup",
+    "Relation resolution",
     "Repository persistence",
     "Metadata persistence",
     "Relation persistence",
@@ -59,6 +65,9 @@ class RepositoryStat:
     relation_insert_count: int = 0
     skipped_count: int = 0
     commit_count: int = 0
+    query_count: int = 0
+    round_trip_count: int = 0
+    source_location_insert_count: int = 0
 
 
 @dataclass
@@ -104,7 +113,9 @@ class Profiler:
         self.reasons[stage] = reason
 
     def repository_event(self, event: str, amount: int = 1) -> None:
-        if event == "transaction":
+        if event.startswith("stage:"):
+            self.record(event.removeprefix("stage:"), amount / 1_000_000_000)
+        elif event == "transaction":
             self.repository.transaction_count += amount
         elif event in {"insert", "metadata_insert", "relation_insert"}:
             self.repository.insert_count += amount
@@ -116,6 +127,12 @@ class Profiler:
             self.repository.skipped_count += amount
         elif event == "commit":
             self.repository.commit_count += amount
+        elif event == "query":
+            self.repository.query_count += amount
+        elif event == "round_trip":
+            self.repository.round_trip_count += amount
+        elif event == "source_location_insert":
+            self.repository.source_location_insert_count += amount
 
     def finish(self) -> None:
         """Freeze total execution time and make reports reproducible."""
@@ -188,6 +205,11 @@ class Profiler:
                 "skipped_count": self.repository.skipped_count,
                 "commit_count": self.repository.commit_count,
                 "transaction_count": self.repository.transaction_count,
+                "query_count": self.repository.query_count,
+                "round_trip_count": self.repository.round_trip_count,
+                "source_location_insert_count": (
+                    self.repository.source_location_insert_count
+                ),
             },
             "hotspots": hotspots,
         }
@@ -221,6 +243,10 @@ class Profiler:
                 f"  Skipped count: {repository['skipped_count']}",
                 f"  Commit count: {repository['commit_count']}",
                 f"  Transaction count: {repository['transaction_count']}",
+                f"  Query count: {repository['query_count']}",
+                f"  Database round-trip count: {repository['round_trip_count']}",
+                "  Source-location INSERT count: "
+                f"{repository['source_location_insert_count']}",
                 "",
                 "Object Counts",
             ]

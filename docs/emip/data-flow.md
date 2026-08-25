@@ -52,10 +52,15 @@ objects are merged across scans or providers.
 
 For SQL, EMIP stores exact statement line ranges when the parser can determine
 them reliably. For Informatica XML, EMIP stores the source XML file and qualified
-object context; line numbers remain empty unless they are reliable. The `source`
-query returns only the relevant SQL block or unique XML element context. It does
-not duplicate entire source files in the metadata repository, and emits an
-explicit warning when a file or reliable context cannot be retrieved.
+object context; line numbers remain empty unless they are reliable. XML lookup
+uses the persisted object type and complete qualified ancestry, including the
+workflow or mapping context, rather than matching only the final `NAME`. When a
+definition and an instance have the same name, the object type selects the
+semantically correct XML element. If equally strong candidates remain, EMIP does
+not guess: it omits the excerpt and emits an ambiguity warning. The `source`
+query therefore returns only the relevant SQL block or uniquely identified XML
+element context. It does not duplicate entire source files in the metadata
+repository or fabricate XML line numbers.
 
 ## Stable JSON contract
 

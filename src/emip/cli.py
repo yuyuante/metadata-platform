@@ -108,12 +108,19 @@ def run_scan(
         objects.extend(result.objects)
 
     find_physical_objects = getattr(object_persister, "find_physical_objects", None)
+    if profiler is not None:
+        profiler.start("Repository lookup")
     existing_physical_objects = (
         find_physical_objects() if find_physical_objects is not None else []
     )
+    if profiler is not None:
+        profiler.stop("Repository lookup", len(existing_physical_objects))
+        profiler.start("Metadata integration")
     integration_result = MetadataIntegrationService().integrate(
         objects, existing_physical_objects
     )
+    if profiler is not None:
+        profiler.stop("Metadata integration", len(objects))
     objects = list(integration_result.objects)
     output_dir.mkdir(parents=True, exist_ok=True)
     integration_report_path = output_dir / "integration-report.txt"

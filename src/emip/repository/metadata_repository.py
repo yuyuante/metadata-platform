@@ -3,6 +3,7 @@
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime
+from time import perf_counter_ns
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -217,15 +218,41 @@ class MetadataRepository:
         query = sql.SQL("SELECT 1 FROM {} LIMIT 0").format(table_identifier)
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query)
+                self._execute(cursor, query)
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
             return False
         return True
 
     def _observe(self, event: str, amount: int = 1) -> None:
-        if self._observer is not None:
-            self._observer(event, amount)
+        observer = getattr(self, "_observer", None)
+        if observer is not None:
+            observer(event, amount)
+
+    def _execute(self, cursor: Any, query: Any, parameters: Any | None = None) -> None:
+        if parameters is None:
+            cursor.execute(query)
+        else:
+            cursor.execute(query, parameters)
+        self._observe("query")
+        self._observe("round_trip")
+
+    def _executemany(
+        self, cursor: Any, query: Any, parameter_rows: list[tuple[Any, ...]]
+    ) -> None:
+        cursor.executemany(query, parameter_rows)
+        self._observe("query", len(parameter_rows))
+        self._observe("round_trip", len(parameter_rows))
+
+    def _execute_values(
+        self, cursor: Any, query: Any, parameter_rows: list[tuple[Any, ...]]
+    ) -> None:
+        execute_values(cursor, query.as_string(self._connection), parameter_rows)
+        self._observe("query")
+        self._observe("round_trip")
+
+    def _observe_stage(self, stage: str, started_at: int) -> None:
+        self._observe(f"stage:{stage}", perf_counter_ns() - started_at)
 
     def create_object(self, metadata_object: MetadataObject) -> MetadataObject:
         """Insert and return a MetadataObject."""
@@ -249,7 +276,7 @@ class MetadataRepository:
         )
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, values)
+                self._execute(cursor, query, values)
                 row = cursor.fetchone()
                 self._observe("metadata_insert")
                 if self._column_table_available:
@@ -288,7 +315,7 @@ class MetadataRepository:
             _RETURNING_COLUMNS, self._table_identifier
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query)
+            self._execute(cursor, query)
             rows = cursor.fetchall()
         objects = [_row_to_metadata_object(row) for row in rows]
         object_ids = [item.object_id for item in objects]
@@ -321,7 +348,7 @@ class MetadataRepository:
             sql.Identifier("object_id"),
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query, (str(metadata_object.object_id),))
+            self._execute(cursor, query, (str(metadata_object.object_id),))
             row = cursor.fetchone()
         if row is None:
             return None
@@ -356,7 +383,7 @@ class MetadataRepository:
             sql.Identifier("object_id"),
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query, (str(metadata_object.object_id),))
+            self._execute(cursor, query, (str(metadata_object.object_id),))
             row = cursor.fetchone()
         if row is None:
             return None
@@ -402,7 +429,7 @@ class MetadataRepository:
         )
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, values)
+                self._execute(cursor, query, values)
                 row = cursor.fetchone()
                 if (
                     row is not None
@@ -447,7 +474,8 @@ class MetadataRepository:
             self._source_location_table_identifier,
             _SOURCE_LOCATION_RETURNING_COLUMNS,
         )
-        cursor.executemany(
+        self._executemany(
+            cursor,
             query,
             [
                 (
@@ -477,7 +505,7 @@ class MetadataRepository:
             self._source_location_table_identifier,
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query, (str(object_id),))
+            self._execute(cursor, query, (str(object_id),))
             rows = cursor.fetchall()
         return tuple(_row_to_source_location(row) for row in rows)
 
@@ -497,7 +525,9 @@ class MetadataRepository:
             self._source_location_table_identifier,
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query, ([str(object_id) for object_id in object_ids],))
+            self._execute(
+                cursor, query, ([str(object_id) for object_id in object_ids],)
+            )
             rows = cursor.fetchall()
         grouped: dict[UUID, list[SourceLocation]] = defaultdict(list)
         for row in rows:
@@ -566,7 +596,8 @@ class MetadataRepository:
         ]
         try:
             with self._connection.cursor() as cursor:
-                execute_values(cursor, query.as_string(self._connection), values)
+                self._execute_values(cursor, query, values)
+                self._observe("source_location_insert", len(values))
             self._connection.commit()
             self._observe("commit")
             self._observe("transaction")
@@ -588,7 +619,8 @@ class MetadataRepository:
         query = sql.SQL(
             "INSERT INTO {} ({}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
         ).format(self._column_table_identifier, _COLUMN_RETURNING_COLUMNS)
-        cursor.executemany(
+        self._executemany(
+            cursor,
             query,
             [
                 (
@@ -614,7 +646,8 @@ class MetadataRepository:
         query = sql.SQL("INSERT INTO {} ({}) VALUES (%s, %s, %s, %s)").format(
             self._property_table_identifier, _PROPERTY_RETURNING_COLUMNS
         )
-        cursor.executemany(
+        self._executemany(
+            cursor,
             query,
             [
                 (
@@ -630,7 +663,8 @@ class MetadataRepository:
     def _replace_properties(
         self, cursor: Any, object_id: UUID, properties: tuple[ObjectProperty, ...]
     ) -> None:
-        cursor.execute(
+        self._execute(
+            cursor,
             sql.SQL("DELETE FROM {} WHERE object_id = %s").format(
                 self._property_table_identifier
             ),
@@ -644,7 +678,7 @@ class MetadataRepository:
         ).format(_PROPERTY_RETURNING_COLUMNS, self._property_table_identifier)
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, (str(object_id),))
+                self._execute(cursor, query, (str(object_id),))
                 rows = cursor.fetchall()
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
@@ -670,7 +704,9 @@ class MetadataRepository:
         ).format(_PROPERTY_RETURNING_COLUMNS, self._property_table_identifier)
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, ([str(object_id) for object_id in object_ids],))
+                self._execute(
+                    cursor, query, ([str(object_id) for object_id in object_ids],)
+                )
                 rows = cursor.fetchall()
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
@@ -693,7 +729,8 @@ class MetadataRepository:
     ) -> None:
         """Replace columns for an object in the current object transaction."""
 
-        cursor.execute(
+        self._execute(
+            cursor,
             sql.SQL("DELETE FROM {} WHERE object_id = %s").format(
                 self._column_table_identifier
             ),
@@ -712,7 +749,7 @@ class MetadataRepository:
         )
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, (str(object_id),))
+                self._execute(cursor, query, (str(object_id),))
                 rows = cursor.fetchall()
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
@@ -734,7 +771,9 @@ class MetadataRepository:
             "ORDER BY object_id, ordinal_position"
         ).format(_COLUMN_RETURNING_COLUMNS, self._column_table_identifier)
         with self._connection.cursor() as cursor:
-            cursor.execute(query, ([str(object_id) for object_id in object_ids],))
+            self._execute(
+                cursor, query, ([str(object_id) for object_id in object_ids],)
+            )
             rows = cursor.fetchall()
         grouped: dict[UUID, list[Column]] = defaultdict(list)
         for row in rows:
@@ -752,7 +791,7 @@ class MetadataRepository:
             "SELECT {} FROM {} WHERE system_name = %s AND qualified_name = %s"
         ).format(_RETURNING_COLUMNS, self._table_identifier)
         with self._connection.cursor() as cursor:
-            cursor.execute(query, (system_name, qualified_name))
+            self._execute(cursor, query, (system_name, qualified_name))
             row = cursor.fetchone()
         if row is None:
             return None
@@ -766,7 +805,7 @@ class MetadataRepository:
             _RETURNING_COLUMNS, self._table_identifier
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query, (qualified_name,))
+            self._execute(cursor, query, (qualified_name,))
             row = cursor.fetchone()
         return None if row is None else _row_to_metadata_object(row)
 
@@ -777,7 +816,8 @@ class MetadataRepository:
             _RETURNING_COLUMNS, self._table_identifier
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(
+            self._execute(
+                cursor,
                 query,
                 (
                     ObjectType.TABLE.value,
@@ -795,7 +835,7 @@ class MetadataRepository:
             _RETURNING_COLUMNS, self._table_identifier
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query)
+            self._execute(cursor, query)
             rows = cursor.fetchall()
         objects = [_row_to_metadata_object(row) for row in rows]
         properties = self._load_properties_for_objects(
@@ -820,7 +860,7 @@ class MetadataRepository:
         ).format(self._relation_table_identifier)
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query)
+                self._execute(cursor, query)
                 rows = cursor.fetchall()
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
@@ -839,7 +879,8 @@ class MetadataRepository:
         ).format(self._relation_table_identifier)
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(
+                self._execute(
+                    cursor,
                     exists_query,
                     (
                         str(relation.source_object_id),
@@ -849,7 +890,8 @@ class MetadataRepository:
                     ),
                 )
                 if cursor.fetchone() is None:
-                    cursor.execute(
+                    self._execute(
+                        cursor,
                         insert_query,
                         (
                             str(relation.relation_id),
@@ -881,19 +923,29 @@ class MetadataRepository:
         source/target definitions are not silently dropped.
         """
         count = 0
+        lookup_started_at = perf_counter_ns()
         objects_by_identity: dict[tuple[str, tuple[str, ...]], MetadataObject] = {}
         objects_by_name: dict[tuple[str, ...], MetadataObject] = {}
+        objects_by_id: dict[UUID, MetadataObject] = {}
+        children_by_parent_and_name: dict[
+            tuple[tuple[str, ...], tuple[str, ...]], dict[UUID, MetadataObject]
+        ] = {}
         for metadata_object in self.find_objects():
+            normalized_name = normalize_identifier(metadata_object.qualified_name)
+            objects_by_id[metadata_object.object_id] = metadata_object
             objects_by_identity.setdefault(
                 (
                     metadata_object.system_name,
-                    normalize_identifier(metadata_object.qualified_name),
+                    normalized_name,
                 ),
                 metadata_object,
             )
-            objects_by_name.setdefault(
-                normalize_identifier(metadata_object.qualified_name), metadata_object
-            )
+            objects_by_name.setdefault(normalized_name, metadata_object)
+            if normalized_name:
+                child_key = (normalized_name[:-1], (normalized_name[-1],))
+                children_by_parent_and_name.setdefault(child_key, {})[
+                    metadata_object.object_id
+                ] = metadata_object
 
         def final_identifier(value: str) -> tuple[str, ...]:
             normalized = normalize_identifier(value)
@@ -909,30 +961,21 @@ class MetadataRepository:
         # scan the EXECUTES edge and the mapping data edges are submitted in
         # one batch, so relying only on already persisted edges loses the
         # context needed to resolve the latter.
-        mapping_sessions: dict[UUID, list[MetadataObject]] = {}
-        for relation in self.find_relations():
-            if relation.relation_type is not RelationType.EXECUTES:
+        existing_relations = self.find_relations()
+        mapping_sessions: dict[UUID, dict[UUID, MetadataObject]] = {}
+        for relation in existing_relations:
+            if str(relation.relation_type) != str(RelationType.EXECUTES):
                 continue
-            session = next(
-                (
-                    item
-                    for item in objects_by_name.values()
-                    if item.object_id == relation.source_object_id
-                    and item.object_type is ObjectType.SESSION
-                ),
-                None,
-            )
-            mapping = next(
-                (
-                    item
-                    for item in objects_by_name.values()
-                    if item.object_id == relation.target_object_id
-                    and item.object_type is ObjectType.MAPPING
-                ),
-                None,
-            )
+            session = objects_by_id.get(relation.source_object_id)
+            mapping = objects_by_id.get(relation.target_object_id)
             if session is not None and mapping is not None:
-                mapping_sessions.setdefault(mapping.object_id, []).append(session)
+                if (
+                    session.object_type is ObjectType.SESSION
+                    and mapping.object_type is ObjectType.MAPPING
+                ):
+                    mapping_sessions.setdefault(mapping.object_id, {})[
+                        session.object_id
+                    ] = session
 
         def exact(value: str) -> MetadataObject | None:
             return objects_by_name.get(normalize_identifier(value))
@@ -945,19 +988,15 @@ class MetadataRepository:
             if resolved is not None or related_mapping is None:
                 return resolved
             wanted = final_identifier(value)
-            matches: list[MetadataObject] = []
-            for session in mapping_sessions.get(related_mapping.object_id, []):
+            matches: dict[UUID, MetadataObject] = {}
+            for session in mapping_sessions.get(related_mapping.object_id, {}).values():
                 prefix = normalize_identifier(session.qualified_name)
-                for item in objects_by_name.values():
-                    qualified = normalize_identifier(item.qualified_name)
-                    if (
-                        item.object_id != session.object_id
-                        and qualified[:-1] == prefix
-                        and final_identifier(item.qualified_name) == wanted
-                    ):
-                        matches.append(item)
-            unique = {item.object_id: item for item in matches}
-            return next(iter(unique.values())) if len(unique) == 1 else None
+                for item in children_by_parent_and_name.get(
+                    (prefix, wanted), {}
+                ).values():
+                    if item.object_id != session.object_id:
+                        matches[item.object_id] = item
+            return next(iter(matches.values())) if len(matches) == 1 else None
 
         existing_edges = {
             (
@@ -966,8 +1005,10 @@ class MetadataRepository:
                 str(relation.relation_type),
                 relation.source_type,
             )
-            for relation in self.find_relations()
+            for relation in existing_relations
         }
+        self._observe_stage("Relation lookup", lookup_started_at)
+        resolution_started_at = perf_counter_ns()
         superseded_execute_pairs: set[tuple[UUID, UUID]] = set()
         delete_execute_query = sql.SQL(
             "DELETE FROM {} WHERE from_object_id = %s AND to_object_id = %s "
@@ -975,7 +1016,7 @@ class MetadataRepository:
         ).format(self._relation_table_identifier)
         insert_query = sql.SQL(
             "INSERT INTO {} (relation_id, from_object_id, to_object_id, "
-            "relation_type, source_type, created_at) VALUES (%s,%s,%s,%s,%s,%s)"
+            "relation_type, source_type, created_at) VALUES %s"
         ).format(self._relation_table_identifier)
         inserts: list[tuple[str, str, str, str, str, datetime]] = []
         try:
@@ -1003,9 +1044,9 @@ class MetadataRepository:
                     and source_object.object_type is ObjectType.SESSION
                     and target.object_type is ObjectType.MAPPING
                 ):
-                    mapping_sessions.setdefault(target.object_id, []).append(
-                        source_object
-                    )
+                    mapping_sessions.setdefault(target.object_id, {})[
+                        source_object.object_id
+                    ] = source_object
 
             for source, candidate in candidates:
                 source_object = objects_by_identity.get(
@@ -1065,9 +1106,11 @@ class MetadataRepository:
                         _to_database_timestamp(datetime.now(UTC)),
                     )
                 )
+            self._observe_stage("Relation resolution", resolution_started_at)
             with self._connection.cursor() as cursor:
                 if superseded_execute_pairs:
-                    cursor.executemany(
+                    self._executemany(
+                        cursor,
                         delete_execute_query,
                         [
                             (str(source_id), str(target_id), str(RelationType.EXECUTES))
@@ -1075,7 +1118,7 @@ class MetadataRepository:
                         ],
                     )
                 if inserts:
-                    cursor.executemany(insert_query, inserts)
+                    self._execute_values(cursor, insert_query, inserts)
                     self._observe("relation_insert", len(inserts))
             self._connection.commit()
             self._observe("commit")
@@ -1103,7 +1146,7 @@ class MetadataRepository:
         ).format(self._relation_table_identifier, sql.Identifier(endpoint_column))
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, (str(object_id),))
+                self._execute(cursor, query, (str(object_id),))
                 rows = cursor.fetchall()
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
@@ -1120,7 +1163,7 @@ class MetadataRepository:
         )
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, (str(metadata_object.object_id),))
+                self._execute(cursor, query, (str(metadata_object.object_id),))
                 row = cursor.fetchone()
             self._connection.commit()
         except psycopg2.Error:
@@ -1153,7 +1196,8 @@ class MetadataRepository:
             sql.Identifier("qualified_name"),
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(
+            self._execute(
+                cursor,
                 query,
                 (
                     str(metadata_object.object_id),
