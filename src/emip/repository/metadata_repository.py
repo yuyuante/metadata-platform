@@ -3,14 +3,16 @@
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime
+from time import perf_counter_ns
 from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg2  # type: ignore[import-untyped]
 from psycopg2 import sql
+from psycopg2.extras import execute_values  # type: ignore[import-untyped]
 
 from emip.database import DatabaseConnection, DatabaseNaming
-from emip.database.tables import COLUMN, OBJECT, PROPERTY, RELATION
+from emip.database.tables import COLUMN, OBJECT, PROPERTY, RELATION, SOURCE_LOCATION
 from emip.domain import (
     Column,
     MetadataObject,
@@ -20,6 +22,8 @@ from emip.domain import (
     Relation,
     RelationCandidate,
     RelationType,
+    SourceLocation,
+    SourceType,
 )
 from emip.identity import normalize_identifier
 
@@ -56,6 +60,21 @@ _COLUMN_RETURNING_COLUMNS = sql.SQL(", ").join(
 _PROPERTY_COLUMNS = ("PROPERTY_ID", "OBJECT_ID", "PROPERTY_NAME", "PROPERTY_VALUE")
 _PROPERTY_RETURNING_COLUMNS = sql.SQL(", ").join(
     sql.Identifier(column_name.lower()) for column_name in _PROPERTY_COLUMNS
+)
+_SOURCE_LOCATION_COLUMNS = (
+    "SOURCE_LOCATION_ID",
+    "OBJECT_ID",
+    "SOURCE_ROOT",
+    "SOURCE_FILE",
+    "SOURCE_TYPE",
+    "START_LINE",
+    "END_LINE",
+    "START_COLUMN",
+    "END_COLUMN",
+    "CONTEXT_IDENTIFIER",
+)
+_SOURCE_LOCATION_RETURNING_COLUMNS = sql.SQL(", ").join(
+    sql.Identifier(column_name.lower()) for column_name in _SOURCE_LOCATION_COLUMNS
 )
 
 
@@ -109,6 +128,21 @@ def _row_to_metadata_object(row: tuple[Any, ...]) -> MetadataObject:
     )
 
 
+def _row_to_source_location(row: tuple[Any, ...]) -> SourceLocation:
+    return SourceLocation(
+        source_location_id=UUID(str(row[0])),
+        object_id=UUID(str(row[1])),
+        source_root=row[2],
+        source_file=row[3],
+        source_type=SourceType(row[4]),
+        start_line=row[5],
+        end_line=row[6],
+        start_column=row[7],
+        end_column=row[8],
+        context_identifier=row[9],
+    )
+
+
 def _row_to_relation(row: tuple[Any, ...]) -> Relation:
     """Convert a Greenplum relation row into the canonical domain object."""
 
@@ -157,7 +191,20 @@ class MetadataRepository:
         self._property_table_identifier = sql.Identifier(
             *(part.lower() for part in qualified_property_table.split("."))
         )
+        qualified_source_location_table = DatabaseNaming(
+            settings.schema, settings.table_prefix
+        ).table(SOURCE_LOCATION)
+        self._source_location_table_identifier = sql.Identifier(
+            *(part.lower() for part in qualified_source_location_table.split("."))
+        )
         self._column_table_available = self._has_table(self._column_table_identifier)
+        self._source_location_table_available = self._has_table(
+            self._source_location_table_identifier
+        )
+        self._persistence_objects_by_id: dict[UUID, MetadataObject] | None = None
+        self._persistence_objects_by_identity: (
+            dict[tuple[str, str], MetadataObject] | None
+        ) = None
 
     @property
     def column_table_available(self) -> bool:
@@ -171,15 +218,41 @@ class MetadataRepository:
         query = sql.SQL("SELECT 1 FROM {} LIMIT 0").format(table_identifier)
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query)
+                self._execute(cursor, query)
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
             return False
         return True
 
     def _observe(self, event: str, amount: int = 1) -> None:
-        if self._observer is not None:
-            self._observer(event, amount)
+        observer = getattr(self, "_observer", None)
+        if observer is not None:
+            observer(event, amount)
+
+    def _execute(self, cursor: Any, query: Any, parameters: Any | None = None) -> None:
+        if parameters is None:
+            cursor.execute(query)
+        else:
+            cursor.execute(query, parameters)
+        self._observe("query")
+        self._observe("round_trip")
+
+    def _executemany(
+        self, cursor: Any, query: Any, parameter_rows: list[tuple[Any, ...]]
+    ) -> None:
+        cursor.executemany(query, parameter_rows)
+        self._observe("query", len(parameter_rows))
+        self._observe("round_trip", len(parameter_rows))
+
+    def _execute_values(
+        self, cursor: Any, query: Any, parameter_rows: list[tuple[Any, ...]]
+    ) -> None:
+        execute_values(cursor, query.as_string(self._connection), parameter_rows)
+        self._observe("query")
+        self._observe("round_trip")
+
+    def _observe_stage(self, stage: str, started_at: int) -> None:
+        self._observe(f"stage:{stage}", perf_counter_ns() - started_at)
 
     def create_object(self, metadata_object: MetadataObject) -> MetadataObject:
         """Insert and return a MetadataObject."""
@@ -203,7 +276,7 @@ class MetadataRepository:
         )
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, values)
+                self._execute(cursor, query, values)
                 row = cursor.fetchone()
                 self._observe("metadata_insert")
                 if self._column_table_available:
@@ -213,6 +286,12 @@ class MetadataRepository:
                 self._insert_properties(
                     cursor, metadata_object.object_id, metadata_object.properties
                 )
+                if self._source_location_table_available:
+                    self._insert_source_locations(
+                        cursor,
+                        metadata_object.object_id,
+                        metadata_object.source_locations,
+                    )
             self._connection.commit()
             self._observe("commit")
             self._observe("transaction")
@@ -222,8 +301,43 @@ class MetadataRepository:
         created_object = _row_to_metadata_object(row)
         created_object.columns = self._load_columns(created_object.object_id)
         created_object.properties = self._load_properties(created_object.object_id)
+        created_object.source_locations = self._load_source_locations(
+            created_object.object_id
+        )
         created_object.relation_candidates = metadata_object.relation_candidates
+        self._cache_persistence_object(created_object)
         return created_object
+
+    def prepare_persistence(self) -> int:
+        """Cache persisted object content for one production persistence pass."""
+
+        query = sql.SQL("SELECT {} FROM {} ORDER BY object_id").format(
+            _RETURNING_COLUMNS, self._table_identifier
+        )
+        with self._connection.cursor() as cursor:
+            self._execute(cursor, query)
+            rows = cursor.fetchall()
+        objects = [_row_to_metadata_object(row) for row in rows]
+        object_ids = [item.object_id for item in objects]
+        columns = self._load_columns_for_objects(object_ids)
+        properties = self._load_properties_for_objects(object_ids)
+        for item in objects:
+            item.columns = columns[item.object_id]
+            item.properties = properties[item.object_id]
+        self._persistence_objects_by_id = {item.object_id: item for item in objects}
+        self._persistence_objects_by_identity = {
+            (item.system_name, item.qualified_name): item for item in objects
+        }
+        return len(objects)
+
+    def _cache_persistence_object(self, metadata_object: MetadataObject) -> None:
+        if self._persistence_objects_by_id is None:
+            return
+        self._persistence_objects_by_id[metadata_object.object_id] = metadata_object
+        assert self._persistence_objects_by_identity is not None
+        self._persistence_objects_by_identity[
+            (metadata_object.system_name, metadata_object.qualified_name)
+        ] = metadata_object
 
     def get_object(self, metadata_object: MetadataObject) -> MetadataObject | None:
         """Find a MetadataObject by its object_id."""
@@ -234,7 +348,7 @@ class MetadataRepository:
             sql.Identifier("object_id"),
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query, (str(metadata_object.object_id),))
+            self._execute(cursor, query, (str(metadata_object.object_id),))
             row = cursor.fetchone()
         if row is None:
             return None
@@ -245,7 +359,38 @@ class MetadataRepository:
         metadata_object_result.properties = self._load_properties(
             metadata_object_result.object_id
         )
+        metadata_object_result.source_locations = self._load_source_locations(
+            metadata_object_result.object_id
+        )
         return metadata_object_result
+
+    def get_object_for_persistence(
+        self, metadata_object: MetadataObject
+    ) -> MetadataObject | None:
+        """Load mutable metadata without the independently merged source pointers."""
+
+        if self._persistence_objects_by_id is not None:
+            assert self._persistence_objects_by_identity is not None
+            return self._persistence_objects_by_id.get(
+                metadata_object.object_id
+            ) or self._persistence_objects_by_identity.get(
+                (metadata_object.system_name, metadata_object.qualified_name)
+            )
+
+        query = sql.SQL("SELECT {} FROM {} WHERE {} = %s").format(
+            _RETURNING_COLUMNS,
+            self._table_identifier,
+            sql.Identifier("object_id"),
+        )
+        with self._connection.cursor() as cursor:
+            self._execute(cursor, query, (str(metadata_object.object_id),))
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        result = _row_to_metadata_object(row)
+        result.columns = self._load_columns(result.object_id)
+        result.properties = self._load_properties(result.object_id)
+        return result
 
     def update_object(self, metadata_object: MetadataObject) -> MetadataObject | None:
         """Update and return a MetadataObject, or None when it does not exist."""
@@ -284,7 +429,7 @@ class MetadataRepository:
         )
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, values)
+                self._execute(cursor, query, values)
                 row = cursor.fetchone()
                 if (
                     row is not None
@@ -309,7 +454,157 @@ class MetadataRepository:
         updated_object = _row_to_metadata_object(row)
         updated_object.columns = self._load_columns(updated_object.object_id)
         updated_object.properties = self._load_properties(updated_object.object_id)
+        updated_object.source_locations = self._load_source_locations(
+            updated_object.object_id
+        )
+        self._cache_persistence_object(updated_object)
         return updated_object
+
+    def _insert_source_locations(
+        self,
+        cursor: Any,
+        object_id: UUID,
+        locations: tuple[SourceLocation, ...],
+    ) -> None:
+        if not locations:
+            return
+        query = sql.SQL(
+            "INSERT INTO {} ({}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        ).format(
+            self._source_location_table_identifier,
+            _SOURCE_LOCATION_RETURNING_COLUMNS,
+        )
+        self._executemany(
+            cursor,
+            query,
+            [
+                (
+                    str(item.source_location_id),
+                    str(object_id),
+                    item.source_root,
+                    item.source_file,
+                    item.source_type.value,
+                    item.start_line,
+                    item.end_line,
+                    item.start_column,
+                    item.end_column,
+                    item.context_identifier,
+                )
+                for item in locations
+            ],
+        )
+
+    def _load_source_locations(self, object_id: UUID) -> tuple[SourceLocation, ...]:
+        if not self._source_location_table_available:
+            return ()
+        query = sql.SQL(
+            "SELECT {} FROM {} WHERE object_id = %s "
+            "ORDER BY source_file, start_line, source_location_id"
+        ).format(
+            _SOURCE_LOCATION_RETURNING_COLUMNS,
+            self._source_location_table_identifier,
+        )
+        with self._connection.cursor() as cursor:
+            self._execute(cursor, query, (str(object_id),))
+            rows = cursor.fetchall()
+        return tuple(_row_to_source_location(row) for row in rows)
+
+    def _load_source_locations_for_objects(
+        self, object_ids: list[UUID]
+    ) -> dict[UUID, tuple[SourceLocation, ...]]:
+        result: dict[UUID, tuple[SourceLocation, ...]] = {
+            object_id: () for object_id in object_ids
+        }
+        if not object_ids or not self._source_location_table_available:
+            return result
+        query = sql.SQL(
+            "SELECT {} FROM {} WHERE object_id = ANY(%s::uuid[]) "
+            "ORDER BY object_id, source_file, start_line, source_location_id"
+        ).format(
+            _SOURCE_LOCATION_RETURNING_COLUMNS,
+            self._source_location_table_identifier,
+        )
+        with self._connection.cursor() as cursor:
+            self._execute(
+                cursor, query, ([str(object_id) for object_id in object_ids],)
+            )
+            rows = cursor.fetchall()
+        grouped: dict[UUID, list[SourceLocation]] = defaultdict(list)
+        for row in rows:
+            location = _row_to_source_location(row)
+            grouped[location.object_id].append(location)
+        return {
+            object_id: tuple(grouped.get(object_id, ())) for object_id in object_ids
+        }
+
+    @staticmethod
+    def _source_location_key(location: SourceLocation) -> tuple[object, ...]:
+        return (
+            location.object_id,
+            location.source_root.casefold(),
+            location.source_file.casefold(),
+            location.source_type.value,
+            location.start_line,
+            location.end_line,
+            location.start_column,
+            location.end_column,
+            location.context_identifier,
+        )
+
+    def merge_source_locations(
+        self, locations_by_object: dict[UUID, list[SourceLocation]]
+    ) -> int:
+        """Append distinct source pointers in one transaction without deleting data."""
+
+        if not locations_by_object or not self._source_location_table_available:
+            return 0
+        existing = self._load_source_locations_for_objects(list(locations_by_object))
+        existing_keys = {
+            self._source_location_key(location)
+            for locations in existing.values()
+            for location in locations
+        }
+        missing: list[SourceLocation] = []
+        for object_id, locations in locations_by_object.items():
+            for location in locations:
+                rebound = location.for_object(object_id)
+                key = self._source_location_key(rebound)
+                if key in existing_keys:
+                    continue
+                existing_keys.add(key)
+                missing.append(rebound)
+        if not missing:
+            return 0
+        query = sql.SQL("INSERT INTO {} ({}) VALUES %s").format(
+            self._source_location_table_identifier,
+            _SOURCE_LOCATION_RETURNING_COLUMNS,
+        )
+        values = [
+            (
+                str(item.source_location_id),
+                str(item.object_id),
+                item.source_root,
+                item.source_file,
+                item.source_type.value,
+                item.start_line,
+                item.end_line,
+                item.start_column,
+                item.end_column,
+                item.context_identifier,
+            )
+            for item in missing
+        ]
+        try:
+            with self._connection.cursor() as cursor:
+                self._execute_values(cursor, query, values)
+                self._observe("source_location_insert", len(values))
+            self._connection.commit()
+            self._observe("commit")
+            self._observe("transaction")
+        except psycopg2.Error:
+            self._connection.rollback()
+            raise
+        return len(missing)
 
     def _insert_columns(
         self,
@@ -324,7 +619,8 @@ class MetadataRepository:
         query = sql.SQL(
             "INSERT INTO {} ({}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
         ).format(self._column_table_identifier, _COLUMN_RETURNING_COLUMNS)
-        cursor.executemany(
+        self._executemany(
+            cursor,
             query,
             [
                 (
@@ -350,7 +646,8 @@ class MetadataRepository:
         query = sql.SQL("INSERT INTO {} ({}) VALUES (%s, %s, %s, %s)").format(
             self._property_table_identifier, _PROPERTY_RETURNING_COLUMNS
         )
-        cursor.executemany(
+        self._executemany(
+            cursor,
             query,
             [
                 (
@@ -366,7 +663,8 @@ class MetadataRepository:
     def _replace_properties(
         self, cursor: Any, object_id: UUID, properties: tuple[ObjectProperty, ...]
     ) -> None:
-        cursor.execute(
+        self._execute(
+            cursor,
             sql.SQL("DELETE FROM {} WHERE object_id = %s").format(
                 self._property_table_identifier
             ),
@@ -380,7 +678,7 @@ class MetadataRepository:
         ).format(_PROPERTY_RETURNING_COLUMNS, self._property_table_identifier)
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, (str(object_id),))
+                self._execute(cursor, query, (str(object_id),))
                 rows = cursor.fetchall()
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
@@ -406,7 +704,9 @@ class MetadataRepository:
         ).format(_PROPERTY_RETURNING_COLUMNS, self._property_table_identifier)
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, ([str(object_id) for object_id in object_ids],))
+                self._execute(
+                    cursor, query, ([str(object_id) for object_id in object_ids],)
+                )
                 rows = cursor.fetchall()
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
@@ -429,7 +729,8 @@ class MetadataRepository:
     ) -> None:
         """Replace columns for an object in the current object transaction."""
 
-        cursor.execute(
+        self._execute(
+            cursor,
             sql.SQL("DELETE FROM {} WHERE object_id = %s").format(
                 self._column_table_identifier
             ),
@@ -448,12 +749,39 @@ class MetadataRepository:
         )
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, (str(object_id),))
+                self._execute(cursor, query, (str(object_id),))
                 rows = cursor.fetchall()
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
             return ()
         return tuple(_row_to_column(row) for row in rows)
+
+    def _load_columns_for_objects(
+        self, object_ids: list[UUID]
+    ) -> dict[UUID, tuple[Column, ...]]:
+        """Load persisted columns in one round trip for scan reconciliation."""
+
+        result: dict[UUID, tuple[Column, ...]] = {
+            object_id: () for object_id in object_ids
+        }
+        if not object_ids or not self._column_table_available:
+            return result
+        query = sql.SQL(
+            "SELECT {} FROM {} WHERE object_id = ANY(%s::uuid[]) "
+            "ORDER BY object_id, ordinal_position"
+        ).format(_COLUMN_RETURNING_COLUMNS, self._column_table_identifier)
+        with self._connection.cursor() as cursor:
+            self._execute(
+                cursor, query, ([str(object_id) for object_id in object_ids],)
+            )
+            rows = cursor.fetchall()
+        grouped: dict[UUID, list[Column]] = defaultdict(list)
+        for row in rows:
+            column = _row_to_column(row)
+            grouped[column.object_id].append(column)
+        return {
+            object_id: tuple(grouped.get(object_id, ())) for object_id in object_ids
+        }
 
     def find_object_by_identity(
         self, system_name: str, qualified_name: str
@@ -463,7 +791,7 @@ class MetadataRepository:
             "SELECT {} FROM {} WHERE system_name = %s AND qualified_name = %s"
         ).format(_RETURNING_COLUMNS, self._table_identifier)
         with self._connection.cursor() as cursor:
-            cursor.execute(query, (system_name, qualified_name))
+            self._execute(cursor, query, (system_name, qualified_name))
             row = cursor.fetchone()
         if row is None:
             return None
@@ -477,7 +805,7 @@ class MetadataRepository:
             _RETURNING_COLUMNS, self._table_identifier
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query, (qualified_name,))
+            self._execute(cursor, query, (qualified_name,))
             row = cursor.fetchone()
         return None if row is None else _row_to_metadata_object(row)
 
@@ -488,7 +816,8 @@ class MetadataRepository:
             _RETURNING_COLUMNS, self._table_identifier
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(
+            self._execute(
+                cursor,
                 query,
                 (
                     ObjectType.TABLE.value,
@@ -506,14 +835,20 @@ class MetadataRepository:
             _RETURNING_COLUMNS, self._table_identifier
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(query)
+            self._execute(cursor, query)
             rows = cursor.fetchall()
         objects = [_row_to_metadata_object(row) for row in rows]
         properties = self._load_properties_for_objects(
             [metadata_object.object_id for metadata_object in objects]
         )
+        source_locations = self._load_source_locations_for_objects(
+            [metadata_object.object_id for metadata_object in objects]
+        )
         for metadata_object in objects:
             metadata_object.properties = properties[metadata_object.object_id]
+            metadata_object.source_locations = source_locations[
+                metadata_object.object_id
+            ]
         return objects
 
     def find_relations(self) -> list[Relation]:
@@ -525,7 +860,7 @@ class MetadataRepository:
         ).format(self._relation_table_identifier)
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query)
+                self._execute(cursor, query)
                 rows = cursor.fetchall()
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
@@ -544,7 +879,8 @@ class MetadataRepository:
         ).format(self._relation_table_identifier)
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(
+                self._execute(
+                    cursor,
                     exists_query,
                     (
                         str(relation.source_object_id),
@@ -554,7 +890,8 @@ class MetadataRepository:
                     ),
                 )
                 if cursor.fetchone() is None:
-                    cursor.execute(
+                    self._execute(
+                        cursor,
                         insert_query,
                         (
                             str(relation.relation_id),
@@ -586,19 +923,29 @@ class MetadataRepository:
         source/target definitions are not silently dropped.
         """
         count = 0
+        lookup_started_at = perf_counter_ns()
         objects_by_identity: dict[tuple[str, tuple[str, ...]], MetadataObject] = {}
         objects_by_name: dict[tuple[str, ...], MetadataObject] = {}
+        objects_by_id: dict[UUID, MetadataObject] = {}
+        children_by_parent_and_name: dict[
+            tuple[tuple[str, ...], tuple[str, ...]], dict[UUID, MetadataObject]
+        ] = {}
         for metadata_object in self.find_objects():
+            normalized_name = normalize_identifier(metadata_object.qualified_name)
+            objects_by_id[metadata_object.object_id] = metadata_object
             objects_by_identity.setdefault(
                 (
                     metadata_object.system_name,
-                    normalize_identifier(metadata_object.qualified_name),
+                    normalized_name,
                 ),
                 metadata_object,
             )
-            objects_by_name.setdefault(
-                normalize_identifier(metadata_object.qualified_name), metadata_object
-            )
+            objects_by_name.setdefault(normalized_name, metadata_object)
+            if normalized_name:
+                child_key = (normalized_name[:-1], (normalized_name[-1],))
+                children_by_parent_and_name.setdefault(child_key, {})[
+                    metadata_object.object_id
+                ] = metadata_object
 
         def final_identifier(value: str) -> tuple[str, ...]:
             normalized = normalize_identifier(value)
@@ -614,30 +961,21 @@ class MetadataRepository:
         # scan the EXECUTES edge and the mapping data edges are submitted in
         # one batch, so relying only on already persisted edges loses the
         # context needed to resolve the latter.
-        mapping_sessions: dict[UUID, list[MetadataObject]] = {}
-        for relation in self.find_relations():
-            if relation.relation_type is not RelationType.EXECUTES:
+        existing_relations = self.find_relations()
+        mapping_sessions: dict[UUID, dict[UUID, MetadataObject]] = {}
+        for relation in existing_relations:
+            if str(relation.relation_type) != str(RelationType.EXECUTES):
                 continue
-            session = next(
-                (
-                    item
-                    for item in objects_by_name.values()
-                    if item.object_id == relation.source_object_id
-                    and item.object_type is ObjectType.SESSION
-                ),
-                None,
-            )
-            mapping = next(
-                (
-                    item
-                    for item in objects_by_name.values()
-                    if item.object_id == relation.target_object_id
-                    and item.object_type is ObjectType.MAPPING
-                ),
-                None,
-            )
+            session = objects_by_id.get(relation.source_object_id)
+            mapping = objects_by_id.get(relation.target_object_id)
             if session is not None and mapping is not None:
-                mapping_sessions.setdefault(mapping.object_id, []).append(session)
+                if (
+                    session.object_type is ObjectType.SESSION
+                    and mapping.object_type is ObjectType.MAPPING
+                ):
+                    mapping_sessions.setdefault(mapping.object_id, {})[
+                        session.object_id
+                    ] = session
 
         def exact(value: str) -> MetadataObject | None:
             return objects_by_name.get(normalize_identifier(value))
@@ -650,19 +988,15 @@ class MetadataRepository:
             if resolved is not None or related_mapping is None:
                 return resolved
             wanted = final_identifier(value)
-            matches: list[MetadataObject] = []
-            for session in mapping_sessions.get(related_mapping.object_id, []):
+            matches: dict[UUID, MetadataObject] = {}
+            for session in mapping_sessions.get(related_mapping.object_id, {}).values():
                 prefix = normalize_identifier(session.qualified_name)
-                for item in objects_by_name.values():
-                    qualified = normalize_identifier(item.qualified_name)
-                    if (
-                        item.object_id != session.object_id
-                        and qualified[:-1] == prefix
-                        and final_identifier(item.qualified_name) == wanted
-                    ):
-                        matches.append(item)
-            unique = {item.object_id: item for item in matches}
-            return next(iter(unique.values())) if len(unique) == 1 else None
+                for item in children_by_parent_and_name.get(
+                    (prefix, wanted), {}
+                ).values():
+                    if item.object_id != session.object_id:
+                        matches[item.object_id] = item
+            return next(iter(matches.values())) if len(matches) == 1 else None
 
         existing_edges = {
             (
@@ -671,8 +1005,10 @@ class MetadataRepository:
                 str(relation.relation_type),
                 relation.source_type,
             )
-            for relation in self.find_relations()
+            for relation in existing_relations
         }
+        self._observe_stage("Relation lookup", lookup_started_at)
+        resolution_started_at = perf_counter_ns()
         superseded_execute_pairs: set[tuple[UUID, UUID]] = set()
         delete_execute_query = sql.SQL(
             "DELETE FROM {} WHERE from_object_id = %s AND to_object_id = %s "
@@ -680,7 +1016,7 @@ class MetadataRepository:
         ).format(self._relation_table_identifier)
         insert_query = sql.SQL(
             "INSERT INTO {} (relation_id, from_object_id, to_object_id, "
-            "relation_type, source_type, created_at) VALUES (%s,%s,%s,%s,%s,%s)"
+            "relation_type, source_type, created_at) VALUES %s"
         ).format(self._relation_table_identifier)
         inserts: list[tuple[str, str, str, str, str, datetime]] = []
         try:
@@ -708,9 +1044,9 @@ class MetadataRepository:
                     and source_object.object_type is ObjectType.SESSION
                     and target.object_type is ObjectType.MAPPING
                 ):
-                    mapping_sessions.setdefault(target.object_id, []).append(
-                        source_object
-                    )
+                    mapping_sessions.setdefault(target.object_id, {})[
+                        source_object.object_id
+                    ] = source_object
 
             for source, candidate in candidates:
                 source_object = objects_by_identity.get(
@@ -770,9 +1106,11 @@ class MetadataRepository:
                         _to_database_timestamp(datetime.now(UTC)),
                     )
                 )
+            self._observe_stage("Relation resolution", resolution_started_at)
             with self._connection.cursor() as cursor:
                 if superseded_execute_pairs:
-                    cursor.executemany(
+                    self._executemany(
+                        cursor,
                         delete_execute_query,
                         [
                             (str(source_id), str(target_id), str(RelationType.EXECUTES))
@@ -780,7 +1118,7 @@ class MetadataRepository:
                         ],
                     )
                 if inserts:
-                    cursor.executemany(insert_query, inserts)
+                    self._execute_values(cursor, insert_query, inserts)
                     self._observe("relation_insert", len(inserts))
             self._connection.commit()
             self._observe("commit")
@@ -808,7 +1146,7 @@ class MetadataRepository:
         ).format(self._relation_table_identifier, sql.Identifier(endpoint_column))
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, (str(object_id),))
+                self._execute(cursor, query, (str(object_id),))
                 rows = cursor.fetchall()
         except psycopg2.errors.UndefinedTable:
             self._connection.rollback()
@@ -825,7 +1163,7 @@ class MetadataRepository:
         )
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, (str(metadata_object.object_id),))
+                self._execute(cursor, query, (str(metadata_object.object_id),))
                 row = cursor.fetchone()
             self._connection.commit()
         except psycopg2.Error:
@@ -838,6 +1176,17 @@ class MetadataRepository:
     def exists_object(self, metadata_object: MetadataObject) -> bool:
         """Return whether a MetadataObject already exists."""
 
+        if self._persistence_objects_by_id is not None:
+            assert self._persistence_objects_by_identity is not None
+            return (
+                metadata_object.object_id in self._persistence_objects_by_id
+                or (
+                    metadata_object.system_name,
+                    metadata_object.qualified_name,
+                )
+                in self._persistence_objects_by_identity
+            )
+
         query = sql.SQL(
             "SELECT 1 FROM {} WHERE {} = %s OR ({} = %s AND {} = %s)"
         ).format(
@@ -847,7 +1196,8 @@ class MetadataRepository:
             sql.Identifier("qualified_name"),
         )
         with self._connection.cursor() as cursor:
-            cursor.execute(
+            self._execute(
+                cursor,
                 query,
                 (
                     str(metadata_object.object_id),

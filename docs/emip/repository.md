@@ -1,5 +1,15 @@
 # EMIP Repository Integration
 
+## Source traceability
+
+Repository objects may reference zero or more source locations in the dedicated
+`emip_source_location` table. Each record identifies the source root, relative
+file, SQL or XML source type, optional exact coordinates, and optional parser
+context. Multiple providers and repeated scans merge distinct pointers without
+embedding full source text in repository rows. See
+[Data Flow and Source Traceability](data-flow.md) for query semantics and the
+stable read model.
+
 ## Metadata Integration
 
 EMIP combines SQL metadata and Informatica metadata before repository

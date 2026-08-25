@@ -108,12 +108,19 @@ def run_scan(
         objects.extend(result.objects)
 
     find_physical_objects = getattr(object_persister, "find_physical_objects", None)
+    if profiler is not None:
+        profiler.start("Repository lookup")
     existing_physical_objects = (
         find_physical_objects() if find_physical_objects is not None else []
     )
+    if profiler is not None:
+        profiler.stop("Repository lookup", len(existing_physical_objects))
+        profiler.start("Metadata integration")
     integration_result = MetadataIntegrationService().integrate(
         objects, existing_physical_objects
     )
+    if profiler is not None:
+        profiler.stop("Metadata integration", len(objects))
     objects = list(integration_result.objects)
     output_dir.mkdir(parents=True, exist_ok=True)
     integration_report_path = output_dir / "integration-report.txt"
@@ -259,6 +266,13 @@ def _build_parser() -> argparse.ArgumentParser:
     path_parser.add_argument("source")
     path_parser.add_argument("target")
     add_json_option(path_parser)
+    flow_parser = query_commands.add_parser("flow")
+    flow_parser.add_argument("term")
+    flow_parser.add_argument("--depth", type=int, default=6)
+    add_json_option(flow_parser)
+    source_parser = query_commands.add_parser("source")
+    source_parser.add_argument("term")
+    add_json_option(source_parser)
     return parser
 
 
@@ -276,6 +290,12 @@ def _print_query_result(result: object, as_json: bool) -> None:
             "description",
         ):
             print(f"{key.replace('_', ' ').title()}: {result.get(key) or ''}")
+        return
+    if isinstance(result, dict) and {"root", "nodes", "edges"} <= result.keys():
+        _print_flow_result(result)
+        return
+    if isinstance(result, dict) and "locations" in result:
+        _print_source_result(result)
         return
     if isinstance(result, list):
         for item in result:
@@ -310,6 +330,67 @@ def _print_query_result(result: object, as_json: bool) -> None:
             print(line)
 
 
+def _print_flow_result(result: dict[object, object]) -> None:
+    root = result.get("root")
+    nodes = result.get("nodes")
+    edges = result.get("edges")
+    if not isinstance(root, dict) or not isinstance(nodes, list):
+        print(result)
+        return
+    by_id = {
+        str(node.get("id")): str(node.get("qualified_name"))
+        for node in nodes
+        if isinstance(node, dict)
+    }
+    print(f"Data Flow: {root.get('qualified_name')}")
+    print(f"Root ID: {root.get('id')}")
+    print("Edges:")
+    if isinstance(edges, list) and edges:
+        for edge in edges:
+            if not isinstance(edge, dict):
+                continue
+            source = by_id.get(str(edge.get("source")), str(edge.get("source")))
+            target = by_id.get(str(edge.get("target")), str(edge.get("target")))
+            print(f"  {source} --[{edge.get('relation_type')}]--> {target}")
+    else:
+        print("  None")
+    warnings = result.get("warnings")
+    if isinstance(warnings, dict):
+        print(
+            "Warnings: "
+            + ", ".join(f"{key}={value}" for key, value in warnings.items())
+        )
+
+
+def _print_source_result(result: dict[object, object]) -> None:
+    item = result.get("object")
+    locations = result.get("locations")
+    if isinstance(item, dict):
+        print(f"Source: {item.get('qualified_name')} [{item.get('id')}]")
+    if not isinstance(locations, list) or not locations:
+        print("No source locations recorded.")
+        return
+    for location in locations:
+        if not isinstance(location, dict):
+            continue
+        print(f"File: {location.get('source_file')}")
+        start = location.get("start_line")
+        end = location.get("end_line")
+        if start is not None:
+            print(f"Lines: {start}-{end or start}")
+        context = location.get("context_identifier")
+        if context:
+            print(f"Context: {context}")
+        warning = location.get("warning")
+        if warning:
+            print(f"Warning: {warning}")
+        excerpt = location.get("excerpt")
+        if excerpt:
+            print("---")
+            print(excerpt)
+            print("---")
+
+
 def run_query(args: argparse.Namespace) -> int:
     """Execute one query without scanning or parsing source files."""
 
@@ -339,6 +420,10 @@ def run_query(args: argparse.Namespace) -> int:
             }
         elif command == "path":
             result = engine.path(args.source, args.target)
+        elif command == "flow":
+            result = engine.flow(args.term, args.depth)
+        elif command == "source":
+            result = engine.source(args.term)
         else:
             print(f"Unsupported query: {command}")
             return 1

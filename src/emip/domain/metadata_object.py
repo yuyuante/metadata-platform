@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from .domain import Column, ObjectProperty, RelationCandidate
+    from .source_location import SourceLocation
 
 
 class ObjectType(StrEnum):
@@ -77,6 +78,7 @@ class MetadataObject:
     columns: tuple[Column, ...] = ()
     properties: tuple[ObjectProperty, ...] = ()
     relation_candidates: tuple[RelationCandidate, ...] = ()
+    source_locations: tuple[SourceLocation, ...] = ()
 
     def __post_init__(self) -> None:
         """Set the display name and validate required names."""
@@ -104,6 +106,7 @@ class MetadataObject:
         columns: tuple[Column, ...] = (),
         properties: tuple[ObjectProperty, ...] = (),
         relation_candidates: tuple[RelationCandidate, ...] = (),
+        source_locations: tuple[SourceLocation, ...] = (),
     ) -> Self:
         """Create a metadata object with generated identity and timestamps."""
 
@@ -122,6 +125,7 @@ class MetadataObject:
             columns=columns,
             properties=properties,
             relation_candidates=relation_candidates,
+            source_locations=source_locations,
         )
 
 

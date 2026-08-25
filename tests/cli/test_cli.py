@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import cast
 
-from emip.cli import run_scan
+from emip.cli import _build_parser, run_scan
 from emip.domain import MetadataObject
 from emip.repository.metadata_persister import (
     MetadataObjectPersister,
@@ -23,6 +23,25 @@ class InMemoryPersister:
 class FailingPersister:
     def persist(self, objects: list[MetadataObject]) -> PersistenceResult:
         return PersistenceResult(0, 0, len(objects))
+
+
+def test_query_flow_arguments() -> None:
+    args = _build_parser().parse_args(
+        ["query", "flow", "dbo.STKOUT", "--depth", "6", "--json"]
+    )
+
+    assert args.query_command == "flow"
+    assert args.term == "dbo.STKOUT"
+    assert args.depth == 6
+    assert args.json is True
+
+
+def test_query_source_arguments() -> None:
+    args = _build_parser().parse_args(["query", "source", "dbo.STKOUT", "--json"])
+
+    assert args.query_command == "source"
+    assert args.term == "dbo.STKOUT"
+    assert args.json is True
 
 
 def test_run_scan_persists_objects_and_prints_summary(

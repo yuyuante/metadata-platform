@@ -1,4 +1,5 @@
 from typing import cast
+from uuid import UUID
 
 from emip.domain import (
     MetadataObject,
@@ -6,6 +7,8 @@ from emip.domain import (
     ObjectType,
     RelationCandidate,
     RelationType,
+    SourceLocation,
+    SourceType,
 )
 from emip.repository.metadata_persister import (
     MetadataObjectPersister,
@@ -21,6 +24,12 @@ class InMemoryMetadataRepository:
         self.existing: set[str] = set()
         self.relation_candidates: list[tuple[MetadataObject, RelationCandidate]] = []
         self.updated: list[MetadataObject] = []
+        self.source_locations: dict[UUID, list[SourceLocation]] = {}
+        self.persistence_prepared = False
+
+    def prepare_persistence(self) -> int:
+        self.persistence_prepared = True
+        return len(self.objects)
 
     def exists_object(self, metadata_object: MetadataObject) -> bool:
         return metadata_object.qualified_name in self.existing
@@ -64,6 +73,24 @@ class InMemoryMetadataRepository:
         self.updated.append(metadata_object)
         return metadata_object
 
+    def merge_source_locations(
+        self, locations_by_object: dict[UUID, list[SourceLocation]]
+    ) -> int:
+        inserted = 0
+        for object_id, locations in locations_by_object.items():
+            target = self.source_locations.setdefault(object_id, [])
+            existing = {
+                MetadataObjectPersister._source_location_content((location,))[0]
+                for location in target
+            }
+            for location in locations:
+                key = MetadataObjectPersister._source_location_content((location,))[0]
+                if key not in existing:
+                    target.append(location)
+                    existing.add(key)
+                    inserted += 1
+        return inserted
+
 
 def _object(name: str) -> MetadataObject:
     return MetadataObject.create(
@@ -87,6 +114,7 @@ def test_persist_creates_every_new_metadata_object() -> None:
         objects_created=2, objects_skipped=0, objects_failed=0
     )
     assert len(repository.objects) == 2
+    assert repository.persistence_prepared
 
 
 def test_persist_skips_existing_metadata_object() -> None:
@@ -191,6 +219,46 @@ def test_persist_updates_changed_core_metadata() -> None:
     assert repository.updated == [incoming]
 
 
+def test_persist_merges_distinct_source_locations_for_existing_object() -> None:
+    repository = InMemoryMetadataRepository()
+    existing = _object("customer")
+    existing.source_locations = (
+        SourceLocation(
+            object_id=existing.object_id,
+            source_root="D:/sql/one",
+            source_file="customer.sql",
+            source_type=SourceType.SQL,
+            start_line=1,
+            end_line=3,
+        ),
+    )
+    repository.objects.append(existing)
+    repository.existing.add(existing.qualified_name)
+    repository.source_locations[existing.object_id] = list(existing.source_locations)
+    incoming = _object("customer")
+    incoming.source_locations = (
+        SourceLocation(
+            object_id=incoming.object_id,
+            source_root="D:/sql/two",
+            source_file="customer.sql",
+            source_type=SourceType.SQL,
+            start_line=5,
+            end_line=7,
+        ),
+    )
+
+    result = _persister(repository).persist([incoming])
+
+    assert result.objects_skipped == 1
+    assert repository.updated == []
+    locations = repository.source_locations[existing.object_id]
+    assert {location.source_root for location in locations} == {
+        "D:/sql/one",
+        "D:/sql/two",
+    }
+    assert all(location.object_id == existing.object_id for location in locations)
+
+
 def test_persist_counts_failed_object_and_continues() -> None:
     repository = InMemoryMetadataRepository()
     original = repository.create_object
@@ -236,6 +304,27 @@ def test_persist_reports_current_object_and_result() -> None:
     assert any("Saving [1/2] saved; created=1" in item for item in progress)
     assert "Saving [2/2] sales.order" in progress
     assert progress[-1].endswith("created=2, skipped=0, failed=0")
+
+
+def test_persist_throttles_per_object_progress_for_large_scans() -> None:
+    repository = InMemoryMetadataRepository()
+    progress: list[str] = []
+    objects = [_object(f"object_{index}") for index in range(251)]
+
+    result = MetadataObjectPersister(
+        repository=cast(MetadataRepository, repository),
+        progress_callback=progress.append,
+    ).persist(objects)
+
+    assert result.objects_created == 251
+    object_progress = [
+        message for message in progress if message.startswith("Saving [")
+    ]
+    assert len(object_progress) == 8
+    assert any("Saving [1/251] " in message for message in object_progress)
+    assert any("Saving [100/251] " in message for message in object_progress)
+    assert any("Saving [200/251] " in message for message in object_progress)
+    assert any("Saving [251/251] " in message for message in object_progress)
 
 
 def test_classifies_foreign_key_failure() -> None:

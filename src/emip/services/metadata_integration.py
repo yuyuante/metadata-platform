@@ -6,7 +6,13 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from emip.domain import MetadataObject, ObjectType, RelationCandidate, RelationType
+from emip.domain import (
+    MetadataObject,
+    ObjectType,
+    RelationCandidate,
+    RelationType,
+    SourceLocation,
+)
 from emip.identity import (
     normalize_identifier,
     physical_identity_keys,
@@ -78,6 +84,7 @@ class MetadataIntegrationService:
                 existing.columns = item.columns
             if not existing.properties and item.properties:
                 existing.properties = item.properties
+            existing.source_locations = self._merge_source_locations(existing, item)
 
         integrated = list(merged.values())
         persisted_physical = list(existing_physical_objects)
@@ -90,6 +97,31 @@ class MetadataIntegrationService:
             duplicate_identities=tuple(duplicate_identities),
             **findings,
         )
+
+    @staticmethod
+    def _merge_source_locations(
+        existing: MetadataObject, duplicate: MetadataObject
+    ) -> tuple[SourceLocation, ...]:
+        """Keep every distinct origin when provider output is integrated."""
+
+        merged = []
+        seen: set[tuple[object, ...]] = set()
+        for location in existing.source_locations + duplicate.source_locations:
+            key = (
+                location.source_root,
+                location.source_file,
+                location.source_type,
+                location.start_line,
+                location.end_line,
+                location.start_column,
+                location.end_column,
+                location.context_identifier,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(location.for_object(existing.object_id))
+        return tuple(merged)
 
     @staticmethod
     def _identity(item: MetadataObject) -> tuple[str, ...]:
