@@ -4,6 +4,8 @@ from emip.domain import (
     ObjectType,
     Relation,
     RelationType,
+    SourceLocation,
+    SourceType,
 )
 from emip.services.query_engine import QueryEngine, tree_lines
 
@@ -78,6 +80,30 @@ def test_object_lookup_and_wildcard_search() -> None:
     assert result["object_type"] == "TABLE"
     assert result["schema"] == "sales"
     assert len(engine.search("vw_cust*")) == 1
+
+
+def test_flow_and_source_resolve_stable_object_id(tmp_path) -> None:
+    engine, objects = _engine()
+    customer = objects["customer"]
+    source = tmp_path / "customer.sql"
+    source.write_text("CREATE TABLE customer;\n", encoding="utf-8")
+    customer.source_locations = (
+        SourceLocation(
+            object_id=customer.object_id,
+            source_root=str(tmp_path),
+            source_file=source.name,
+            source_type=SourceType.SQL,
+            start_line=1,
+            end_line=1,
+        ),
+    )
+
+    flow = engine.flow(str(customer.object_id), depth=3)
+    traceability = engine.source(str(customer.object_id))
+
+    assert flow["root"]["id"] == str(customer.object_id)  # type: ignore[index]
+    assert str(objects["view"].object_id) in flow["downstream"]  # type: ignore[operator]
+    assert traceability["locations"][0]["excerpt"] == "CREATE TABLE customer;"  # type: ignore[index]
 
 
 def test_workflow_impact_dependencies_and_reverse_dependencies() -> None:

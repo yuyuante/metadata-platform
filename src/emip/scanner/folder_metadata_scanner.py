@@ -5,7 +5,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, cast
 
-from emip.domain import MetadataObject
+from emip.domain import MetadataObject, SourceLocation, SourceType
 from emip.parser.informatica.xml_parser import InformaticaMetadataParser
 from emip.parser.parser_dispatcher import ParserDispatcher
 from emip.parser.script_splitter import ScriptSplitter
@@ -32,6 +32,8 @@ class _StatementSource:
 
     source_path: Path
     statement: str
+    start_line: int | None
+    end_line: int | None
 
     @property
     def stem(self) -> str:
@@ -71,7 +73,7 @@ class FolderMetadataScanner:
         if parser is None:
             return []
         try:
-            return self._parse_file(path, parser)
+            return self._parse_file(path, parser, path.parent)
         except UnsupportedInputError:
             return []
 
@@ -99,7 +101,7 @@ class FolderMetadataScanner:
 
         parser_name = type(parser).__name__
         try:
-            objects = self._parse_file(path, parser)
+            objects = self._parse_file(path, parser, root)
         except UnsupportedInputError as exc:
             return FileScanResult(
                 objects=[],
@@ -125,11 +127,16 @@ class FolderMetadataScanner:
 
         objects: list[MetadataObject] = []
         for path in self._scanner.scan(root):
-            objects.extend(self.scan_file(path))
+            parser = self._dispatcher.get_parser(path)
+            if parser is not None:
+                objects.extend(self._parse_file(path, parser, root))
         return objects
 
     def _parse_file(
-        self, path: Path, parser: SqlDdlParser | InformaticaMetadataParser
+        self,
+        path: Path,
+        parser: SqlDdlParser | InformaticaMetadataParser,
+        root: Path,
     ) -> list[MetadataObject]:
         """Split and filter SQL before invoking the unchanged parser."""
 
@@ -140,7 +147,7 @@ class FolderMetadataScanner:
                 self._profiler.record(
                     "XML parsing", perf_counter() - started_at, len(parsed_xml_objects)
                 )
-            return parsed_xml_objects
+            return _attach_locations(parsed_xml_objects, path, root, SourceType.XML)
 
         script = self._reader.read(path)
         filtering_started_at = perf_counter()
@@ -150,8 +157,19 @@ class FolderMetadataScanner:
                 "File filtering", perf_counter() - filtering_started_at
             )
         objects: list[MetadataObject] = []
+        cursor = 0
         for statement in statements:
-            source = _StatementSource(path, statement)
+            offset = script.find(statement, cursor)
+            if offset < 0:
+                offset = script.find(statement)
+            if offset < 0:
+                start_line = None
+                end_line = None
+            else:
+                start_line = script.count("\n", 0, offset) + 1
+                end_line = start_line + statement.count("\n")
+                cursor = offset + len(statement)
+            source = _StatementSource(path, statement, start_line, end_line)
             parsing_started_at = perf_counter()
             parsed_objects = parser.parse(cast(Path, source))
             if self._profiler is not None:
@@ -160,8 +178,50 @@ class FolderMetadataScanner:
                     perf_counter() - parsing_started_at,
                     len(parsed_objects),
                 )
-            objects.extend(parsed_objects)
+            objects.extend(
+                _attach_locations(
+                    parsed_objects,
+                    path,
+                    root,
+                    SourceType.SQL,
+                    start_line,
+                    end_line,
+                )
+            )
         return objects
+
+
+def _attach_locations(
+    objects: list[MetadataObject],
+    path: Path,
+    root: Path,
+    source_type: SourceType,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> list[MetadataObject]:
+    """Attach source pointers without changing parser output semantics."""
+
+    resolved_path = path.resolve()
+    resolved_root = root.resolve()
+    try:
+        source_file = str(resolved_path.relative_to(resolved_root))
+    except ValueError:
+        source_file = str(resolved_path)
+    for item in objects:
+        item.source_locations = (
+            SourceLocation(
+                object_id=item.object_id,
+                source_root=str(resolved_root),
+                source_file=source_file,
+                source_type=source_type,
+                start_line=start_line,
+                end_line=end_line,
+                context_identifier=(
+                    item.qualified_name if source_type is SourceType.XML else None
+                ),
+            ),
+        )
+    return objects
 
 
 def _failure(

@@ -8,9 +8,10 @@ from uuid import UUID, uuid4
 
 import psycopg2  # type: ignore[import-untyped]
 from psycopg2 import sql
+from psycopg2.extras import execute_values  # type: ignore[import-untyped]
 
 from emip.database import DatabaseConnection, DatabaseNaming
-from emip.database.tables import COLUMN, OBJECT, PROPERTY, RELATION
+from emip.database.tables import COLUMN, OBJECT, PROPERTY, RELATION, SOURCE_LOCATION
 from emip.domain import (
     Column,
     MetadataObject,
@@ -20,6 +21,8 @@ from emip.domain import (
     Relation,
     RelationCandidate,
     RelationType,
+    SourceLocation,
+    SourceType,
 )
 from emip.identity import normalize_identifier
 
@@ -56,6 +59,21 @@ _COLUMN_RETURNING_COLUMNS = sql.SQL(", ").join(
 _PROPERTY_COLUMNS = ("PROPERTY_ID", "OBJECT_ID", "PROPERTY_NAME", "PROPERTY_VALUE")
 _PROPERTY_RETURNING_COLUMNS = sql.SQL(", ").join(
     sql.Identifier(column_name.lower()) for column_name in _PROPERTY_COLUMNS
+)
+_SOURCE_LOCATION_COLUMNS = (
+    "SOURCE_LOCATION_ID",
+    "OBJECT_ID",
+    "SOURCE_ROOT",
+    "SOURCE_FILE",
+    "SOURCE_TYPE",
+    "START_LINE",
+    "END_LINE",
+    "START_COLUMN",
+    "END_COLUMN",
+    "CONTEXT_IDENTIFIER",
+)
+_SOURCE_LOCATION_RETURNING_COLUMNS = sql.SQL(", ").join(
+    sql.Identifier(column_name.lower()) for column_name in _SOURCE_LOCATION_COLUMNS
 )
 
 
@@ -109,6 +127,21 @@ def _row_to_metadata_object(row: tuple[Any, ...]) -> MetadataObject:
     )
 
 
+def _row_to_source_location(row: tuple[Any, ...]) -> SourceLocation:
+    return SourceLocation(
+        source_location_id=UUID(str(row[0])),
+        object_id=UUID(str(row[1])),
+        source_root=row[2],
+        source_file=row[3],
+        source_type=SourceType(row[4]),
+        start_line=row[5],
+        end_line=row[6],
+        start_column=row[7],
+        end_column=row[8],
+        context_identifier=row[9],
+    )
+
+
 def _row_to_relation(row: tuple[Any, ...]) -> Relation:
     """Convert a Greenplum relation row into the canonical domain object."""
 
@@ -157,7 +190,20 @@ class MetadataRepository:
         self._property_table_identifier = sql.Identifier(
             *(part.lower() for part in qualified_property_table.split("."))
         )
+        qualified_source_location_table = DatabaseNaming(
+            settings.schema, settings.table_prefix
+        ).table(SOURCE_LOCATION)
+        self._source_location_table_identifier = sql.Identifier(
+            *(part.lower() for part in qualified_source_location_table.split("."))
+        )
         self._column_table_available = self._has_table(self._column_table_identifier)
+        self._source_location_table_available = self._has_table(
+            self._source_location_table_identifier
+        )
+        self._persistence_objects_by_id: dict[UUID, MetadataObject] | None = None
+        self._persistence_objects_by_identity: (
+            dict[tuple[str, str], MetadataObject] | None
+        ) = None
 
     @property
     def column_table_available(self) -> bool:
@@ -213,6 +259,12 @@ class MetadataRepository:
                 self._insert_properties(
                     cursor, metadata_object.object_id, metadata_object.properties
                 )
+                if self._source_location_table_available:
+                    self._insert_source_locations(
+                        cursor,
+                        metadata_object.object_id,
+                        metadata_object.source_locations,
+                    )
             self._connection.commit()
             self._observe("commit")
             self._observe("transaction")
@@ -222,8 +274,43 @@ class MetadataRepository:
         created_object = _row_to_metadata_object(row)
         created_object.columns = self._load_columns(created_object.object_id)
         created_object.properties = self._load_properties(created_object.object_id)
+        created_object.source_locations = self._load_source_locations(
+            created_object.object_id
+        )
         created_object.relation_candidates = metadata_object.relation_candidates
+        self._cache_persistence_object(created_object)
         return created_object
+
+    def prepare_persistence(self) -> int:
+        """Cache persisted object content for one production persistence pass."""
+
+        query = sql.SQL("SELECT {} FROM {} ORDER BY object_id").format(
+            _RETURNING_COLUMNS, self._table_identifier
+        )
+        with self._connection.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+        objects = [_row_to_metadata_object(row) for row in rows]
+        object_ids = [item.object_id for item in objects]
+        columns = self._load_columns_for_objects(object_ids)
+        properties = self._load_properties_for_objects(object_ids)
+        for item in objects:
+            item.columns = columns[item.object_id]
+            item.properties = properties[item.object_id]
+        self._persistence_objects_by_id = {item.object_id: item for item in objects}
+        self._persistence_objects_by_identity = {
+            (item.system_name, item.qualified_name): item for item in objects
+        }
+        return len(objects)
+
+    def _cache_persistence_object(self, metadata_object: MetadataObject) -> None:
+        if self._persistence_objects_by_id is None:
+            return
+        self._persistence_objects_by_id[metadata_object.object_id] = metadata_object
+        assert self._persistence_objects_by_identity is not None
+        self._persistence_objects_by_identity[
+            (metadata_object.system_name, metadata_object.qualified_name)
+        ] = metadata_object
 
     def get_object(self, metadata_object: MetadataObject) -> MetadataObject | None:
         """Find a MetadataObject by its object_id."""
@@ -245,7 +332,38 @@ class MetadataRepository:
         metadata_object_result.properties = self._load_properties(
             metadata_object_result.object_id
         )
+        metadata_object_result.source_locations = self._load_source_locations(
+            metadata_object_result.object_id
+        )
         return metadata_object_result
+
+    def get_object_for_persistence(
+        self, metadata_object: MetadataObject
+    ) -> MetadataObject | None:
+        """Load mutable metadata without the independently merged source pointers."""
+
+        if self._persistence_objects_by_id is not None:
+            assert self._persistence_objects_by_identity is not None
+            return self._persistence_objects_by_id.get(
+                metadata_object.object_id
+            ) or self._persistence_objects_by_identity.get(
+                (metadata_object.system_name, metadata_object.qualified_name)
+            )
+
+        query = sql.SQL("SELECT {} FROM {} WHERE {} = %s").format(
+            _RETURNING_COLUMNS,
+            self._table_identifier,
+            sql.Identifier("object_id"),
+        )
+        with self._connection.cursor() as cursor:
+            cursor.execute(query, (str(metadata_object.object_id),))
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        result = _row_to_metadata_object(row)
+        result.columns = self._load_columns(result.object_id)
+        result.properties = self._load_properties(result.object_id)
+        return result
 
     def update_object(self, metadata_object: MetadataObject) -> MetadataObject | None:
         """Update and return a MetadataObject, or None when it does not exist."""
@@ -309,7 +427,153 @@ class MetadataRepository:
         updated_object = _row_to_metadata_object(row)
         updated_object.columns = self._load_columns(updated_object.object_id)
         updated_object.properties = self._load_properties(updated_object.object_id)
+        updated_object.source_locations = self._load_source_locations(
+            updated_object.object_id
+        )
+        self._cache_persistence_object(updated_object)
         return updated_object
+
+    def _insert_source_locations(
+        self,
+        cursor: Any,
+        object_id: UUID,
+        locations: tuple[SourceLocation, ...],
+    ) -> None:
+        if not locations:
+            return
+        query = sql.SQL(
+            "INSERT INTO {} ({}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        ).format(
+            self._source_location_table_identifier,
+            _SOURCE_LOCATION_RETURNING_COLUMNS,
+        )
+        cursor.executemany(
+            query,
+            [
+                (
+                    str(item.source_location_id),
+                    str(object_id),
+                    item.source_root,
+                    item.source_file,
+                    item.source_type.value,
+                    item.start_line,
+                    item.end_line,
+                    item.start_column,
+                    item.end_column,
+                    item.context_identifier,
+                )
+                for item in locations
+            ],
+        )
+
+    def _load_source_locations(self, object_id: UUID) -> tuple[SourceLocation, ...]:
+        if not self._source_location_table_available:
+            return ()
+        query = sql.SQL(
+            "SELECT {} FROM {} WHERE object_id = %s "
+            "ORDER BY source_file, start_line, source_location_id"
+        ).format(
+            _SOURCE_LOCATION_RETURNING_COLUMNS,
+            self._source_location_table_identifier,
+        )
+        with self._connection.cursor() as cursor:
+            cursor.execute(query, (str(object_id),))
+            rows = cursor.fetchall()
+        return tuple(_row_to_source_location(row) for row in rows)
+
+    def _load_source_locations_for_objects(
+        self, object_ids: list[UUID]
+    ) -> dict[UUID, tuple[SourceLocation, ...]]:
+        result: dict[UUID, tuple[SourceLocation, ...]] = {
+            object_id: () for object_id in object_ids
+        }
+        if not object_ids or not self._source_location_table_available:
+            return result
+        query = sql.SQL(
+            "SELECT {} FROM {} WHERE object_id = ANY(%s::uuid[]) "
+            "ORDER BY object_id, source_file, start_line, source_location_id"
+        ).format(
+            _SOURCE_LOCATION_RETURNING_COLUMNS,
+            self._source_location_table_identifier,
+        )
+        with self._connection.cursor() as cursor:
+            cursor.execute(query, ([str(object_id) for object_id in object_ids],))
+            rows = cursor.fetchall()
+        grouped: dict[UUID, list[SourceLocation]] = defaultdict(list)
+        for row in rows:
+            location = _row_to_source_location(row)
+            grouped[location.object_id].append(location)
+        return {
+            object_id: tuple(grouped.get(object_id, ())) for object_id in object_ids
+        }
+
+    @staticmethod
+    def _source_location_key(location: SourceLocation) -> tuple[object, ...]:
+        return (
+            location.object_id,
+            location.source_root.casefold(),
+            location.source_file.casefold(),
+            location.source_type.value,
+            location.start_line,
+            location.end_line,
+            location.start_column,
+            location.end_column,
+            location.context_identifier,
+        )
+
+    def merge_source_locations(
+        self, locations_by_object: dict[UUID, list[SourceLocation]]
+    ) -> int:
+        """Append distinct source pointers in one transaction without deleting data."""
+
+        if not locations_by_object or not self._source_location_table_available:
+            return 0
+        existing = self._load_source_locations_for_objects(list(locations_by_object))
+        existing_keys = {
+            self._source_location_key(location)
+            for locations in existing.values()
+            for location in locations
+        }
+        missing: list[SourceLocation] = []
+        for object_id, locations in locations_by_object.items():
+            for location in locations:
+                rebound = location.for_object(object_id)
+                key = self._source_location_key(rebound)
+                if key in existing_keys:
+                    continue
+                existing_keys.add(key)
+                missing.append(rebound)
+        if not missing:
+            return 0
+        query = sql.SQL("INSERT INTO {} ({}) VALUES %s").format(
+            self._source_location_table_identifier,
+            _SOURCE_LOCATION_RETURNING_COLUMNS,
+        )
+        values = [
+            (
+                str(item.source_location_id),
+                str(item.object_id),
+                item.source_root,
+                item.source_file,
+                item.source_type.value,
+                item.start_line,
+                item.end_line,
+                item.start_column,
+                item.end_column,
+                item.context_identifier,
+            )
+            for item in missing
+        ]
+        try:
+            with self._connection.cursor() as cursor:
+                execute_values(cursor, query.as_string(self._connection), values)
+            self._connection.commit()
+            self._observe("commit")
+            self._observe("transaction")
+        except psycopg2.Error:
+            self._connection.rollback()
+            raise
+        return len(missing)
 
     def _insert_columns(
         self,
@@ -455,6 +719,31 @@ class MetadataRepository:
             return ()
         return tuple(_row_to_column(row) for row in rows)
 
+    def _load_columns_for_objects(
+        self, object_ids: list[UUID]
+    ) -> dict[UUID, tuple[Column, ...]]:
+        """Load persisted columns in one round trip for scan reconciliation."""
+
+        result: dict[UUID, tuple[Column, ...]] = {
+            object_id: () for object_id in object_ids
+        }
+        if not object_ids or not self._column_table_available:
+            return result
+        query = sql.SQL(
+            "SELECT {} FROM {} WHERE object_id = ANY(%s::uuid[]) "
+            "ORDER BY object_id, ordinal_position"
+        ).format(_COLUMN_RETURNING_COLUMNS, self._column_table_identifier)
+        with self._connection.cursor() as cursor:
+            cursor.execute(query, ([str(object_id) for object_id in object_ids],))
+            rows = cursor.fetchall()
+        grouped: dict[UUID, list[Column]] = defaultdict(list)
+        for row in rows:
+            column = _row_to_column(row)
+            grouped[column.object_id].append(column)
+        return {
+            object_id: tuple(grouped.get(object_id, ())) for object_id in object_ids
+        }
+
     def find_object_by_identity(
         self, system_name: str, qualified_name: str
     ) -> MetadataObject | None:
@@ -512,8 +801,14 @@ class MetadataRepository:
         properties = self._load_properties_for_objects(
             [metadata_object.object_id for metadata_object in objects]
         )
+        source_locations = self._load_source_locations_for_objects(
+            [metadata_object.object_id for metadata_object in objects]
+        )
         for metadata_object in objects:
             metadata_object.properties = properties[metadata_object.object_id]
+            metadata_object.source_locations = source_locations[
+                metadata_object.object_id
+            ]
         return objects
 
     def find_relations(self) -> list[Relation]:
@@ -837,6 +1132,17 @@ class MetadataRepository:
 
     def exists_object(self, metadata_object: MetadataObject) -> bool:
         """Return whether a MetadataObject already exists."""
+
+        if self._persistence_objects_by_id is not None:
+            assert self._persistence_objects_by_identity is not None
+            return (
+                metadata_object.object_id in self._persistence_objects_by_id
+                or (
+                    metadata_object.system_name,
+                    metadata_object.qualified_name,
+                )
+                in self._persistence_objects_by_identity
+            )
 
         query = sql.SQL(
             "SELECT 1 FROM {} WHERE {} = %s OR ({} = %s AND {} = %s)"

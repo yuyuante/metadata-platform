@@ -4,8 +4,15 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, cast
+from uuid import UUID
 
-from emip.domain import Column, MetadataObject, ObjectProperty, Relation
+from emip.domain import (
+    Column,
+    MetadataObject,
+    ObjectProperty,
+    Relation,
+    SourceLocation,
+)
 from emip.repository.metadata_repository import MetadataRepository
 
 
@@ -89,7 +96,11 @@ class MetadataObjectPersister:
     ) -> MetadataObject | None:
         """Resolve a skipped object using repository identity, not a new UUID."""
 
-        get_object = getattr(self._repository, "get_object", None)
+        get_object = getattr(
+            self._repository,
+            "get_object_for_persistence",
+            getattr(self._repository, "get_object", None),
+        )
         stored = (
             cast(MetadataObject | None, get_object(metadata_object))
             if get_object is not None
@@ -142,6 +153,56 @@ class MetadataObjectPersister:
                 item.is_unique,
             )
             for item in columns
+        )
+
+    @staticmethod
+    def _source_location_content(
+        locations: tuple[SourceLocation, ...],
+    ) -> list[tuple[object, ...]]:
+        """Return source-location content without generated identifiers."""
+
+        return sorted(
+            (
+                item.source_root,
+                item.source_file,
+                item.source_type.value,
+                item.start_line,
+                item.end_line,
+                item.start_column,
+                item.end_column,
+                item.context_identifier,
+            )
+            for item in locations
+        )
+
+    @classmethod
+    def _merge_source_locations(
+        cls,
+        stored: tuple[SourceLocation, ...],
+        incoming: tuple[SourceLocation, ...],
+        object_id: UUID,
+    ) -> tuple[SourceLocation, ...]:
+        """Preserve every distinct persisted source pointer for an object."""
+
+        by_content = {
+            cls._source_location_content((location,))[0]: location
+            for location in (*stored, *incoming)
+        }
+        return tuple(
+            location.for_object(object_id)
+            for location in sorted(
+                by_content.values(),
+                key=lambda item: (
+                    item.source_root.casefold(),
+                    item.source_file.casefold(),
+                    item.source_type.value,
+                    item.start_line or 0,
+                    item.end_line or 0,
+                    item.start_column or 0,
+                    item.end_column or 0,
+                    item.context_identifier or "",
+                ),
+            )
         )
 
     @classmethod
@@ -210,9 +271,17 @@ class MetadataObjectPersister:
         failures: list[PersistenceFailure] = []
         object_list = list(objects)
         resolved_sources = []
+        source_locations_by_object: dict[UUID, list[SourceLocation]] = {}
         total_objects = len(object_list)
         persistence_started_at = perf_counter()
         self._report_progress(f"Saving started: {total_objects} objects")
+        prepare_persistence = getattr(self._repository, "prepare_persistence", None)
+        if prepare_persistence is not None:
+            self._report_progress("Saving: indexing existing repository objects")
+            indexed = prepare_persistence()
+            self._report_progress(
+                f"Saving: indexed {indexed} existing repository objects"
+            )
         if getattr(self._repository, "column_table_available", True) is False:
             self._report_progress(
                 "Repository notice: optional EMIP_COLUMN table is unavailable; "
@@ -230,6 +299,12 @@ class MetadataObjectPersister:
                         self._profiler.repository_event("skipped")
                     stored = self._resolve_existing_object(metadata_object)
                     if stored is not None:
+                        source_locations_by_object.setdefault(
+                            stored.object_id, []
+                        ).extend(
+                            location.for_object(stored.object_id)
+                            for location in metadata_object.source_locations
+                        )
                         if self._metadata_content_changed(stored, metadata_object):
                             update_object = getattr(
                                 self._repository, "update_object", None
@@ -276,6 +351,16 @@ class MetadataObjectPersister:
                 f"created={objects_created}, skipped={objects_skipped}, "
                 f"failed={objects_failed}"
             )
+        merge_source_locations = getattr(
+            self._repository, "merge_source_locations", None
+        )
+        if source_locations_by_object and merge_source_locations is not None:
+            self._report_progress(
+                "Saving source locations: "
+                f"{sum(map(len, source_locations_by_object.values()))} candidates"
+            )
+            merge_source_locations(source_locations_by_object)
+            self._report_progress("Saving source locations: completed")
         candidates = [
             (obj, candidate)
             for obj, object_candidates in resolved_sources

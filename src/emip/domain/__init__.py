@@ -19,6 +19,7 @@ from .domain import (
     Tag,
 )
 from .metadata_object import MetadataObject, Object, ObjectStatus, ObjectType
+from .source_location import SourceLocation, SourceType
 
 __all__ = [
     "Column",
@@ -40,5 +41,7 @@ __all__ = [
     "ScanResult",
     "ScanStatus",
     "ScanTarget",
+    "SourceLocation",
+    "SourceType",
     "Tag",
 ]

@@ -188,11 +188,20 @@ python -m emip query impact CUSTOMER --depth 3
 python -m emip query depends proc_sync_customer
 python -m emip query used-by CUSTOMER
 python -m emip query path CUSTOMER ACCOUNT
+python -m emip query flow dbo.STKOUT --depth 6
+python -m emip query source dbo.STKOUT
 python -m emip query search customer --json
 ```
 
 `object` performs an exact object lookup. Use `search` for partial matches,
 case-insensitive matching, or wildcards such as `*STK*`.
+
+`flow` returns a deterministic, cycle-safe upstream/downstream graph from
+repository data. `source` returns persisted SQL or Informatica XML source
+locations and a bounded source excerpt when it can be resolved reliably. Both
+commands accept `--json`; every flow node can also be queried by its stable UUID.
+See [Data Flow and Source Traceability](docs/emip/data-flow.md) for relation
+direction, warning counts, and the stable JSON contract.
 
 ## Current Limitations / 目前限制
 

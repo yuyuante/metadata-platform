@@ -9,6 +9,8 @@ from typing import Protocol, cast
 from uuid import UUID
 
 from emip.domain import MetadataObject, ObjectType, Relation, RelationType
+from emip.services.data_flow import DataFlowService
+from emip.services.source_traceability import SourceTraceabilityService
 
 
 class QueryRepository(Protocol):
@@ -208,6 +210,13 @@ class QueryEngine:
     def resolve(self, term: str) -> MetadataObject:
         """Resolve an exact object name or qualified name."""
 
+        try:
+            object_id = UUID(term)
+        except ValueError:
+            object_id = None
+        if object_id is not None and object_id in self._by_id:
+            return self._by_id[object_id]
+
         wanted = _identity(term)
         qualified_matches = [
             item for item in self._objects if _identity(item.qualified_name) == wanted
@@ -232,6 +241,20 @@ class QueryEngine:
 
     def object_lookup(self, term: str) -> dict[str, object]:
         return _object_dict(self.resolve(term))
+
+    def flow(self, term: str, depth: int = 6) -> dict[str, object]:
+        """Return a deterministic, bounded semantic data-flow projection."""
+
+        return (
+            DataFlowService()
+            .build(self.resolve(term), self._objects, self._relations, depth)
+            .to_dict()
+        )
+
+    def source(self, term: str) -> dict[str, object]:
+        """Return persisted source pointers and bounded source excerpts."""
+
+        return SourceTraceabilityService().retrieve(self.resolve(term))
 
     def search(self, term: str) -> list[dict[str, object]]:
         pattern = _identity(term)
