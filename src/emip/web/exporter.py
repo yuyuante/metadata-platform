@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import time
 from collections import OrderedDict, defaultdict
@@ -87,18 +88,13 @@ class StaticWebExporter:
 
         object_dir = output_dir / "data" / "objects"
         flow_dir = output_dir / "data" / "flows"
+        search_dir = output_dir / "data" / "search"
         object_dir.mkdir(parents=True, exist_ok=True)
         flow_dir.mkdir(parents=True, exist_ok=True)
+        search_dir.mkdir(parents=True, exist_ok=True)
         self._copy_assets(output_dir)
 
-        search_items = [
-            _search_item(
-                item,
-                f"data/objects/{item.object_id}.json",
-                f"data/flows/{item.object_id}.json",
-            )
-            for item in objects
-        ]
+        search_items = [_search_item(item) for item in objects]
 
         def export_object(
             item: MetadataObject, source_service: SourceTraceabilityService
@@ -128,10 +124,13 @@ class StaticWebExporter:
             for _ in executor.map(export_group, groups):
                 pass
 
+        shard_paths = _write_search_shards(search_dir, search_items)
         index_payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "generated": {"object_count": len(objects), "flow_depth": depth},
-            "objects": search_items,
+            "minimum_query_length": 3,
+            "default_object_id": search_items[0]["id"] if search_items else None,
+            "shards": shard_paths,
         }
         _write_json(output_dir / "data" / "index.json", index_payload)
         elapsed = time.perf_counter() - started_at
@@ -190,19 +189,51 @@ def _source_groups(
     return result
 
 
-def _search_item(
-    item: MetadataObject, detail_path: str, flow_path: str
-) -> dict[str, object]:
+def _search_item(item: MetadataObject) -> dict[str, object]:
     return {
         "id": str(item.object_id),
         "qualified_name": item.qualified_name,
         "name": item.name,
         "object_type": item.object_type.value,
         "provider": item.system_name,
-        "system": item.system_name,
-        "detail": detail_path,
-        "flow": flow_path,
     }
+
+
+_SEARCH_TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _search_prefixes(item: dict[str, object]) -> set[str]:
+    prefixes: set[str] = set()
+    for field in ("qualified_name", "name", "object_type", "provider"):
+        value = str(item.get(field) or "").lower()
+        for token in _SEARCH_TOKEN.findall(value):
+            if len(token) >= 3:
+                prefixes.add(token[:3])
+    return prefixes
+
+
+def _write_search_shards(
+    search_dir: Path, search_items: list[dict[str, object]]
+) -> dict[str, dict[str, object]]:
+    shards: defaultdict[str, list[dict[str, object]]] = defaultdict(list)
+    for item in search_items:
+        for prefix in _search_prefixes(item):
+            shards[prefix].append(item)
+
+    paths: dict[str, dict[str, object]] = {}
+    for prefix in sorted(shards):
+        filename = prefix.encode("utf-8").hex()
+        relative_path = f"data/search/{filename}.json"
+        paths[prefix] = {
+            "object_count": len(shards[prefix]),
+            "path": relative_path,
+        }
+        _write_json(
+            search_dir / f"{filename}.json",
+            {"schema_version": 1, "objects": shards[prefix]},
+            compact=True,
+        )
+    return paths
 
 
 def _relationship_indexes(
@@ -300,10 +331,24 @@ def _detail_payload(
     }
 
 
-def _write_json(path: Path, payload: object) -> None:
+def _write_json(path: Path, payload: object, *, compact: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if compact:
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    else:
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
     path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        serialized + "\n",
         encoding="utf-8",
         newline="\n",
     )

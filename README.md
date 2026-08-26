@@ -436,6 +436,12 @@ python -m http.server 8000 --directory web-dist
 
 Then open `http://localhost:8000`. The browser reads generated artifacts only and does not connect directly to Greenplum.
 
+Search uses a compact startup manifest and lazy three-character token-prefix
+shards, choosing the smallest shard represented in a multi-token query, so the
+browser does not load the complete repository catalog before its first useful
+interaction. Explicit **Explore from selection** actions create
+`#object=<stable-object-id>` history entries that work with browser Back/Forward.
+
 See [Static Developer Web](docs/emip/developer-web.md) for the output contract and deployment notes.
 
 ## Running Tests / 執行測試

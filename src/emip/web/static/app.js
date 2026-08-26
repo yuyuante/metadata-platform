@@ -1,13 +1,28 @@
 "use strict";
 
-const state = { index: [], byId: new Map(), flow: null, selectedId: null };
+const state = {
+  manifest: null,
+  shardCache: new Map(),
+  flow: null,
+  selectedId: null,
+  pendingRootId: null,
+  navigationVersion: 0,
+  searchVersion: 0,
+  searchTimer: null,
+  restoreScheduled: false,
+};
 const el = id => document.getElementById(id);
 
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 function text(tag, value, className) { const node=document.createElement(tag); node.textContent=value ?? ""; if(className) node.className=className; return node; }
-function button(label, id, className="link-button") { const node=text("button", label, className); node.type="button"; node.addEventListener("click",()=>selectObject(id)); return node; }
+function button(label, id, className="link-button") { const node=text("button", label, className); node.type="button"; node.dataset.objectId=id; node.addEventListener("click",()=>void selectObject(id).catch(showError)); return node; }
 
 async function loadJson(path) { const response=await fetch(path); if(!response.ok) throw new Error(`${response.status} ${path}`); return response.json(); }
+function objectPath(id) { return `data/objects/${encodeURIComponent(id)}.json`; }
+function flowPath(id) { return `data/flows/${encodeURIComponent(id)}.json`; }
+function objectIdFromHash() { return new URLSearchParams(location.hash.slice(1)).get("object"); }
+function isObjectId(id) { return /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(id || ""); }
+function objectHash(id) { return `#object=${encodeURIComponent(id)}`; }
 
 function renderResults(items) {
   const list=el("results"); clear(list);
@@ -15,10 +30,42 @@ function renderResults(items) {
   if(!items.length) list.append(text("li","No matching objects.","empty"));
 }
 
-function search() {
+function searchPrefix(term) {
+  const prefixes=(term.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu)||[]).filter(token=>Array.from(token).length>=3).map(token=>Array.from(token).slice(0,3).join(""));
+  return prefixes.reduce((smallest,prefix)=>!smallest || (state.manifest.shards[prefix]?.object_count??0)<(state.manifest.shards[smallest]?.object_count??0) ? prefix : smallest,"");
+}
+
+async function loadSearchShard(prefix) {
+  if(state.shardCache.has(prefix)) return state.shardCache.get(prefix);
+  const shard=state.manifest.shards[prefix];
+  if(!shard) return [];
+  const promise=loadJson(shard.path).then(payload => payload.objects);
+  state.shardCache.set(prefix,promise);
+  try { return await promise; }
+  catch(error) { state.shardCache.delete(prefix); throw error; }
+}
+
+async function search() {
+  const version=++state.searchVersion;
   const term=el("search").value.trim().toLocaleLowerCase();
-  const matches=!term ? state.index.slice(0,50) : state.index.filter(item => [item.qualified_name,item.name,item.object_type,item.provider,item.system].some(value => String(value||"").toLocaleLowerCase().includes(term)));
+  if(Array.from(term).length < state.manifest.minimum_query_length) {
+    const list=el("results"); clear(list);
+    list.append(text("li",`Enter at least ${state.manifest.minimum_query_length} characters.`,"empty"));
+    return;
+  }
+  const items=await loadSearchShard(searchPrefix(term));
+  if(version !== state.searchVersion) return;
+  const matches=[];
+  for(const item of items) {
+    if([item.qualified_name,item.name,item.object_type,item.provider].some(value => String(value||"").toLocaleLowerCase().includes(term))) matches.push(item);
+    if(matches.length===100) break;
+  }
   renderResults(matches);
+}
+
+function scheduleSearch() {
+  clearTimeout(state.searchTimer);
+  state.searchTimer=setTimeout(()=>void search().catch(showError),200);
 }
 
 function nodeMap(flow) { return new Map(flow.nodes.map(node=>[node.id,node])); }
@@ -59,17 +106,57 @@ function renderDetail(detail) {
   if(!locations.length) host.append(text("p","No persisted source locations.","empty"));
 }
 
-function markSelection() { document.querySelectorAll(".node-button").forEach(node=>node.classList.toggle("selected",node.textContent===state.byId.get(state.selectedId)?.qualified_name)); }
+function markSelection() { document.querySelectorAll(".node-button").forEach(node=>node.classList.toggle("selected",node.dataset.objectId===state.selectedId)); }
 
 async function selectObject(id) {
-  const item=state.byId.get(id); if(!item) return; state.selectedId=id; el("explore").disabled=state.flow?.root.id===id; markSelection(); renderDetail(await loadJson(item.detail));
+  if(!isObjectId(id)) return;
+  const detail=await loadJson(objectPath(id));
+  state.selectedId=id; el("explore").disabled=state.flow?.root.id===id; markSelection(); renderDetail(detail);
 }
 
-async function explore(id) { const item=state.byId.get(id); if(!item) return; history.replaceState(null,"",`#object=${encodeURIComponent(id)}`); renderFlow(await loadJson(item.flow)); await selectObject(id); }
+async function navigateRoot(id, historyMode="push") {
+  if(!isObjectId(id) || state.pendingRootId===id || (state.flow?.root.id===id && historyMode==="none")) return;
+  const version=++state.navigationVersion;
+  state.pendingRootId=id;
+  try {
+    const [flow,detail]=await Promise.all([loadJson(flowPath(id)),loadJson(objectPath(id))]);
+    if(version !== state.navigationVersion) return;
+    if(historyMode==="push" && location.hash!==objectHash(id)) history.pushState(null,"",objectHash(id));
+    if(historyMode==="replace" && location.hash!==objectHash(id)) history.replaceState(null,"",objectHash(id));
+    renderFlow(flow); state.selectedId=id; renderDetail(detail); el("explore").disabled=true; markSelection();
+  } finally {
+    if(version===state.navigationVersion) state.pendingRootId=null;
+  }
+}
+
+function scheduleHistoryRestore() {
+  if(state.restoreScheduled) return;
+  state.restoreScheduled=true;
+  queueMicrotask(()=>{
+    state.restoreScheduled=false;
+    const requested=objectIdFromHash();
+    if(isObjectId(requested)) void navigateRoot(requested,"none").catch(showError);
+  });
+}
+
+function showError(error) {
+  el("status").textContent="Unable to load export";
+  const host=el("detail"); clear(host); host.append(text("p",String(error),"warnings"));
+}
 
 async function start() {
-  try { const payload=await loadJson("data/index.json"); state.index=payload.objects; state.byId=new Map(state.index.map(item=>[item.id,item])); el("status").textContent=`${payload.generated.object_count.toLocaleString()} repository objects`; el("search").addEventListener("input",search); el("explore").addEventListener("click",()=>explore(state.selectedId)); search(); const requested=new URLSearchParams(location.hash.slice(1)).get("object"); const initial=state.byId.has(requested) ? requested : state.index[0]?.id; if(initial) await explore(initial); }
-  catch(error) { el("status").textContent="Unable to load export"; el("detail").append(text("p",String(error),"warnings")); }
+  try {
+    state.manifest=await loadJson("data/index.json");
+    el("status").textContent=`${state.manifest.generated.object_count.toLocaleString()} repository objects`;
+    el("search").addEventListener("input",scheduleSearch);
+    el("explore").addEventListener("click",()=>void navigateRoot(state.selectedId).catch(showError));
+    window.addEventListener("popstate",scheduleHistoryRestore);
+    window.addEventListener("hashchange",scheduleHistoryRestore);
+    await search();
+    const requested=objectIdFromHash();
+    if(isObjectId(requested)) await navigateRoot(requested,"none");
+    else if(isObjectId(state.manifest.default_object_id)) await navigateRoot(state.manifest.default_object_id,"replace");
+  } catch(error) { showError(error); }
 }
 
-start();
+void start();
