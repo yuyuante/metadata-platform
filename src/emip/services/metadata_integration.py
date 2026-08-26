@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from emip.domain import (
     MetadataObject,
+    ObjectProperty,
     ObjectType,
     RelationCandidate,
     RelationType,
@@ -22,8 +25,13 @@ from emip.identity import (
 _PHYSICAL_TYPES = frozenset(
     {ObjectType.TABLE, ObjectType.VIEW, ObjectType.MATERIALIZED_VIEW}
 )
+_CALLABLE_TYPES = frozenset({ObjectType.FUNCTION, ObjectType.PROCEDURE})
 _DEFINITION_TYPES = frozenset(
     {ObjectType.SOURCE_DEFINITION, ObjectType.TARGET_DEFINITION}
+)
+_EMBEDDED_SQL_SOURCE_TYPE = "INFORMATICA_EMBEDDED_SQL"
+_CONNECTION_WRAPPER_TOKENS = frozenset(
+    {"connection", "conn", "database", "db", "dsn", "jdbc", "odbc", "sql"}
 )
 
 
@@ -37,6 +45,107 @@ _INFORMATICA_SUFFIXES = (
     "_del",
     "_upd",
 )
+
+
+def _unique_physical_match(
+    value: str,
+    physical: dict[tuple[str, ...], list[MetadataObject]],
+    allowed_types: frozenset[ObjectType] = _PHYSICAL_TYPES,
+    connection_name: str | None = None,
+) -> MetadataObject | None:
+    """Use the strongest provider-aware identity tier and reject ambiguity."""
+
+    parts = normalize_identifier(value)
+    if not parts:
+        return None
+    keys = [parts]
+    if len(parts) > 2:
+        keys.append(parts[-2:])
+    if len(parts) > 1:
+        keys.append((parts[-1],))
+    for key in keys:
+        tier = tuple(physical.get(key, ()))
+        matches = {
+            str(item.object_id): item
+            for item in tier
+            if connection_name is None
+            or _connection_matches_physical(connection_name, item)
+        }
+        if len(matches) == 1:
+            target = next(iter(matches.values()))
+            return target if target.object_type in allowed_types else None
+        if len(matches) > 1:
+            return None
+        # A populated stronger tier that conflicts with the captured
+        # connection must not fall through to a global short-name match.
+        if tier and connection_name is not None:
+            return None
+    return None
+
+
+def _connection_aliases(value: str) -> set[str]:
+    """Return conservative aliases after removing transport wrapper tokens."""
+
+    tokens = tuple(
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9]+", value.replace("_", " "))
+        if token
+    )
+    if not tokens:
+        return set()
+    aliases = {"".join(tokens)}
+    remaining = tokens
+    while len(remaining) > 1 and remaining[0] in _CONNECTION_WRAPPER_TOKENS:
+        remaining = remaining[1:]
+        aliases.add("".join(remaining))
+    return aliases
+
+
+def _physical_connection_aliases(item: MetadataObject) -> set[str]:
+    """Build provider/database/schema aliases that may scope a physical object."""
+
+    aliases = _connection_aliases(item.system_name)
+    qualified_parts = normalize_identifier(item.qualified_name)
+    for part in qualified_parts[:-1]:
+        aliases.update(_connection_aliases(part))
+    for prop in item.properties:
+        property_key = re.sub(r"[^a-z0-9]", "", prop.property_name.casefold())
+        if (
+            property_key
+            in {
+                "connection",
+                "connectionname",
+                "dbconnection",
+                "dbconnectionname",
+            }
+            and prop.property_value
+        ):
+            aliases.update(_connection_aliases(prop.property_value))
+    return aliases
+
+
+def _connection_matches_physical(connection_name: str, item: MetadataObject) -> bool:
+    """Require an explicit provider/database/schema mapping for a connection."""
+
+    aliases = _connection_aliases(connection_name)
+    return bool(aliases and aliases & _physical_connection_aliases(item))
+
+
+def _embedded_sql_connection(candidate: RelationCandidate) -> str | None:
+    """Read the captured connection context from structured SQL evidence."""
+
+    try:
+        evidence = json.loads(candidate.evidence_sql)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(evidence, dict):
+        return None
+    connection = evidence.get("connection")
+    return (
+        connection.strip()
+        if isinstance(connection, str) and connection.strip()
+        else None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,11 +172,15 @@ class MetadataIntegrationService:
         objects: Iterable[MetadataObject],
         existing_physical_objects: Iterable[MetadataObject] = (),
     ) -> IntegrationResult:
-        merged: dict[tuple[ObjectType, tuple[str, ...]], MetadataObject] = {}
+        merged: dict[tuple[str, ObjectType, tuple[str, ...]], MetadataObject] = {}
         duplicate_identities: list[str] = []
         objects_merged = 0
         for item in objects:
-            identity = (item.object_type, self._identity(item))
+            identity = (
+                item.system_name.casefold(),
+                item.object_type,
+                self._identity(item),
+            )
             existing = merged.get(identity)
             if existing is None:
                 merged[identity] = item
@@ -137,15 +250,26 @@ class MetadataIntegrationService:
     ) -> int:
         physical: dict[tuple[str, ...], list[MetadataObject]] = defaultdict(list)
         physical_by_identity: dict[
-            tuple[ObjectType, tuple[str, ...]], MetadataObject
+            tuple[str, ObjectType, tuple[str, ...]], MetadataObject
         ] = {}
         for item in existing_physical_objects + objects:
             if item.object_type in _PHYSICAL_TYPES:
-                physical_by_identity[(item.object_type, self._identity(item))] = item
+                physical_by_identity[
+                    (
+                        item.system_name.casefold(),
+                        item.object_type,
+                        self._identity(item),
+                    )
+                ] = item
         for item in physical_by_identity.values():
             for key in physical_identity_keys(item.qualified_name):
                 physical[key].append(item)
-        created = 0
+        dependencies = defaultdict(list, physical)
+        for item in existing_physical_objects + objects:
+            if item.object_type in _CALLABLE_TYPES:
+                for key in physical_identity_keys(item.qualified_name):
+                    dependencies[key].append(item)
+        created = self._resolve_embedded_sql_links(objects, dependencies)
         for definition in objects:
             if definition.object_type not in _DEFINITION_TYPES:
                 continue
@@ -172,6 +296,61 @@ class MetadataIntegrationService:
             if candidate not in definition.relation_candidates:
                 definition.relation_candidates += (candidate,)
                 created += 1
+        return created
+
+    @staticmethod
+    def _resolve_embedded_sql_links(
+        objects: list[MetadataObject],
+        physical: dict[tuple[str, ...], list[MetadataObject]],
+    ) -> int:
+        """Resolve embedded references by strongest identity without guessing."""
+
+        created = 0
+        for item in objects:
+            resolved: list[RelationCandidate] = []
+            unresolved_names: list[str] = []
+            for candidate in item.relation_candidates:
+                if candidate.source_type != _EMBEDDED_SQL_SOURCE_TYPE:
+                    resolved.append(candidate)
+                    continue
+                target = _unique_physical_match(
+                    candidate.target_qualified_name,
+                    physical,
+                    (
+                        _CALLABLE_TYPES
+                        if candidate.relation_type is RelationType.CALLS
+                        else _PHYSICAL_TYPES
+                    ),
+                    _embedded_sql_connection(candidate),
+                )
+                if target is None:
+                    unresolved_names.append(candidate.target_qualified_name)
+                    continue
+                resolved.append(
+                    RelationCandidate(
+                        candidate.source_qualified_name,
+                        target.qualified_name,
+                        candidate.relation_type,
+                        candidate.source_type,
+                        candidate.evidence_sql,
+                        target.system_name,
+                    )
+                )
+                created += 1
+            item.relation_candidates = tuple(dict.fromkeys(resolved))
+            existing_unresolved = {
+                prop.property_value
+                for prop in item.properties
+                if prop.property_name == "embedded_sql.unresolved_identity"
+            }
+            item.properties += tuple(
+                ObjectProperty(
+                    property_name="embedded_sql.unresolved_identity",
+                    property_value=name,
+                )
+                for name in dict.fromkeys(unresolved_names)
+                if name not in existing_unresolved
+            )
         return created
 
     @staticmethod

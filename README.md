@@ -135,22 +135,35 @@ The following sections distinguish what is fully supported, partially supported,
 
 ### 1. Informatica component SQL / Informatica 元件內的 SQL
 
-**Current status: Partially supported.**
+**Current status: Object-level lineage supported for evidenced properties.**
 
-EMIP currently parses Informatica structure and preserves many XML attributes/properties, including `ATTRIBUTE`, `TABLEATTRIBUTE`, `VALUEPAIR`, connection information, source/target instances, and transformation metadata. This means SQL-bearing configuration such as Source Qualifier SQL Query, Lookup SQL Override, Pre SQL, Post SQL, or related session-level override text may be retained as metadata properties when present in the exported XML.
+EMIP extracts the exact, non-empty `Sql Query`, `Lookup Sql Override`, `Pre SQL`,
+and `Post SQL` properties observed in PowerCenter `ATTRIBUTE` and
+`TABLEATTRIBUTE` elements. It uses the shared SQL statement splitter and
+SQLGlot AST parsing (generic SQL, then the known T-SQL, Oracle, and PostgreSQL
+production dialects) to derive conservative object-level relations:
 
-However, EMIP does **not yet comprehensively perform a second-stage SQL parse of every SQL-valued Informatica property**.
+- Source Qualifier queries and Lookup overrides create `READS` candidates.
+- `SELECT` references in Pre/Post SQL create `READS` candidates.
+- `INSERT`, `UPDATE`, `DELETE`, and `MERGE` targets in Pre/Post SQL create
+  `WRITES` candidates, while their source tables create `READS` candidates.
+- Multi-statement properties retain every safely parsed relation.
 
-Therefore, the following are not guaranteed today:
+Each extracted fragment remains attached to its originating component through
+`embedded_sql.*` object properties. Evidence includes the XML file/root,
+deterministic XML context, property name, semantic role, raw SQL, connection
+when available, analysis status, parse errors, and unresolved references.
+Relation candidates also carry this evidence in memory. The current persisted
+relation schema stores endpoints, type, and evidence source type but not the
+full evidence payload; the originating object's properties and source location
+are therefore the durable evidence record.
 
-- discovering every physical table referenced only inside Source Qualifier SQL Query;
-- discovering tables referenced only inside Lookup SQL Override;
-- deriving lineage introduced only by Pre SQL or Post SQL;
-- deriving table/column lineage from arbitrary custom SQL or session override SQL;
-- resolving nested SQL inside all Informatica transformation attributes;
-- resolving Informatica parameterized object names such as `$$TABLE_NAME` to environment-specific physical objects;
-- environment-aware lineage when DEV/UAT/PROD parameter files point the same workflow to different tables;
-- complete column-level lineage through Informatica SQL overrides.
+Physical identity resolution uses the strongest available qualified name and
+creates a link only for one unique match. Ambiguous names remain unresolved.
+Runtime-dependent object names such as `$$TABLE_NAME` are recorded as
+unresolved and never turned into exact lineage. Parameter-file ingestion,
+environment-specific resolution, arbitrary SQL-property discovery, and column
+lineage remain outside this capability.
 
 For example, if a Source Qualifier contains:
 
@@ -161,9 +174,11 @@ JOIN TRADE_DATA b
   ON a.STOCK_ID = b.STOCK_ID
 ```
 
-EMIP may retain that SQL text as configuration metadata, but current Informatica parsing does not guarantee that it will create both `READS → STKOUT` and `READS → TRADE_DATA` solely from that SQL override.
+EMIP creates both `READS → STKOUT` and `READS → TRADE_DATA` candidates from
+this override when both physical identities resolve uniquely.
 
-A future enhancement should explicitly extract SQL-bearing Informatica properties, pass them through the SQL parser, attach source/context evidence, and then resolve Informatica parameters before creating confidence-qualified lineage.
+The analyzer creates `READS` candidates for each safely parsed physical object,
+provided its identity resolves uniquely during metadata integration.
 
 ### 2. Embedded SQL inside application source languages / 程式語言內的 Embedded SQL
 
@@ -309,13 +324,11 @@ Future relation/evidence models should preserve the original source, resolution 
 
 The highest-value parser improvements are currently:
 
-1. Extract SQL-bearing Informatica properties systematically.
-2. Feed Informatica SQL Query / Lookup Override / Pre SQL / Post SQL through the existing SQL analysis pipeline.
-3. Add Informatica parameter-file and environment-aware resolution where inputs are available.
-4. Extend Dynamic SQL output with confidence/evidence/unresolved-reason metadata.
-5. Add Python embedded-SQL parsing using language AST rather than regex.
-6. Add Java, C#, C/C++, Shell, and other source-language parsers incrementally.
-7. Build column-level lineage only after object-level cross-provider semantics remain stable.
+1. Add Informatica parameter-file and environment-aware resolution where inputs are available.
+2. Extend Dynamic SQL output with confidence/evidence/unresolved-reason metadata.
+3. Add Python embedded-SQL parsing using language AST rather than regex.
+4. Add Java, C#, C/C++, Shell, and other source-language parsers incrementally.
+5. Build column-level lineage only after object-level cross-provider semantics remain stable.
 
 ## Project Overview / 專案概覽
 
@@ -461,7 +474,9 @@ The platform is already useful for **object-level technical metadata and develop
 
 ## Current Limitations / 目前限制
 
-- Informatica SQL-valued properties are not yet comprehensively reparsed into lineage.
+- Informatica SQL-property lineage is object-level and limited to the four
+  evidenced property names documented above; parameterized object names remain
+  unresolved without environment inputs.
 - Java, Python, C#, C/C++, Shell, Perl, and other embedded-SQL source-language parsers are not implemented.
 - Dynamic SQL is limited to deterministic static folding; runtime-dependent cases remain unresolved.
 - Complete column-level lineage and impact analysis are not implemented.
@@ -473,7 +488,6 @@ The platform is already useful for **object-level technical metadata and develop
 ## Roadmap / 發展路線圖
 
 - Complete Milestone-010 Static Developer Web v1.
-- Informatica embedded SQL extraction and SQL-property lineage.
 - Informatica parameter/environment resolution.
 - Confidence/evidence-aware dynamic SQL lineage.
 - Source-language AST parsers for Python, Java, C#, C/C++, Shell, and others.

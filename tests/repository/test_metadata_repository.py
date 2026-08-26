@@ -235,3 +235,58 @@ def test_create_relations_uses_one_relation_load_and_resolves_session_child() ->
     assert resolved == 1
     assert relation_loads == 1
     assert repository._connection.commits == 1
+
+
+def test_create_relations_honors_resolved_target_provider() -> None:
+    class Cursor:
+        def __enter__(self) -> "Cursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    class Connection:
+        commits = 0
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            raise AssertionError("rollback was not expected")
+
+    qualifier = MetadataObject.create(
+        ObjectType.SOURCE_QUALIFIER, "INFORMATICA", "F::W::S::SQ", "SQ"
+    )
+    wrong = MetadataObject.create(
+        ObjectType.TABLE, "SVELAH", "dbo.SourceTable", "SourceTable"
+    )
+    expected = MetadataObject.create(
+        ObjectType.TABLE, "SVEL", "dbo.SourceTable", "SourceTable"
+    )
+    persisted = Relation(
+        source_object_id=qualifier.object_id,
+        target_object_id=expected.object_id,
+        relation_type=RelationType.READS,
+        source_type="INFORMATICA_EMBEDDED_SQL",
+    )
+    repository = MetadataRepository.__new__(MetadataRepository)
+    repository._connection = Connection()
+    repository._relation_table_identifier = sql.Identifier("emip_relation")
+    repository.find_objects = lambda: [qualifier, wrong, expected]  # type: ignore[method-assign]
+    repository.find_relations = lambda: [persisted]  # type: ignore[method-assign]
+    candidate = RelationCandidate(
+        source_qualified_name=qualifier.qualified_name,
+        target_qualified_name=expected.qualified_name,
+        relation_type=RelationType.READS,
+        source_type="INFORMATICA_EMBEDDED_SQL",
+        evidence_sql="test",
+        target_system_name="SVEL",
+    )
+
+    resolved = repository.create_relations([(qualifier, candidate)])
+
+    assert resolved == 1
+    assert repository._connection.commits == 1

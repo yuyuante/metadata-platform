@@ -112,6 +112,7 @@ class RelationCandidate:
     relation_type: RelationTypeValue
     source_type: str
     evidence_sql: str
+    target_system_name: str | None = None
 
 
 @dataclass(slots=True)

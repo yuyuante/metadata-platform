@@ -16,6 +16,11 @@ from emip.domain import (
     RelationCandidate,
     RelationType,
 )
+from emip.parser.embedded_sql import (
+    EmbeddedSqlAnalysis,
+    EmbeddedSqlAnalyzer,
+    InformaticaEmbeddedSqlExtractor,
+)
 
 
 class InformaticaMetadataParser:
@@ -26,8 +31,12 @@ class InformaticaMetadataParser:
 
     def __init__(self, profiler: Any | None = None) -> None:
         self._profiler = profiler
+        self._embedded_sql_extractor = InformaticaEmbeddedSqlExtractor()
+        self._embedded_sql_analyzer = EmbeddedSqlAnalyzer()
+        self._source_path = Path(".")
 
     def parse(self, path: Path) -> list[MetadataObject]:
+        self._source_path = path
         started_at = perf_counter()
         reading_started_at = perf_counter()
         xml_text = _read_xml(path)
@@ -419,7 +428,13 @@ class InformaticaMetadataParser:
         for transformation in _children(session, "SESSTRANSFORMATIONINST"):
             kind = types.get(_attr(transformation, "TRANSFORMATIONTYPE", "").upper())
             if kind is not None:
-                child = self._child(session_qn, transformation, kind, "SINSTANCENAME")
+                child = self._child(
+                    session_qn,
+                    transformation,
+                    kind,
+                    "SINSTANCENAME",
+                    analyze_embedded_sql=False,
+                )
                 connection = connection_by_instance.get(
                     _attr(transformation, "SINSTANCENAME", "")
                 )
@@ -434,6 +449,7 @@ class InformaticaMetadataParser:
                             property_value=connection,
                         ),
                     )
+                self._attach_embedded_sql(child, transformation, connection or None)
                 if kind is ObjectType.TARGET_DEFINITION:
                     writer_properties: list[ObjectProperty] = []
                     for extension in extensions:
@@ -558,12 +574,15 @@ class InformaticaMetadataParser:
         element: ET.Element,
         kind: ObjectType,
         name_attribute: str = "NAME",
+        *,
+        analyze_embedded_sql: bool = True,
     ) -> MetadataObject:
         return self._object(
             kind,
             self._qn(parent_qn, _attr(element, name_attribute, _name(element))),
             element,
             name_attribute,
+            analyze_embedded_sql=analyze_embedded_sql,
         )
 
     def _object(
@@ -572,9 +591,11 @@ class InformaticaMetadataParser:
         qualified_name: str,
         element: ET.Element,
         name_attribute: str,
+        *,
+        analyze_embedded_sql: bool = True,
     ) -> MetadataObject:
         name = _attr(element, name_attribute, _attr(element, "NAME", _name(element)))
-        return MetadataObject.create(
+        item = MetadataObject.create(
             kind,
             self.system_name,
             qualified_name,
@@ -582,6 +603,31 @@ class InformaticaMetadataParser:
             description=_attr(element, "DESCRIPTION", "") or None,
             properties=_properties(element),
         )
+        if analyze_embedded_sql:
+            self._attach_embedded_sql(item, element)
+        return item
+
+    def _attach_embedded_sql(
+        self,
+        item: MetadataObject,
+        element: ET.Element,
+        connection_name: str | None = None,
+    ) -> None:
+        """Retain SQL evidence and attach safe relation candidates in one pass."""
+
+        fragments = self._embedded_sql_extractor.extract(
+            item.qualified_name,
+            item.object_type,
+            element,
+            self._source_path,
+            connection_name,
+        )
+        for index, fragment in enumerate(fragments, 1):
+            analysis = self._embedded_sql_analyzer.analyze(fragment)
+            item.properties += _embedded_sql_properties(index, analysis)
+            item.relation_candidates = tuple(
+                dict.fromkeys(item.relation_candidates + analysis.relations)
+            )
 
     def _relation(
         self, source: str, target: str, kind: RelationType, evidence: ET.Element
@@ -653,4 +699,54 @@ def _properties(element: ET.Element) -> tuple[ObjectProperty, ...]:
                         property_value=value,
                     )
                 )
+    return tuple(values)
+
+
+def _embedded_sql_properties(
+    index: int, analysis: EmbeddedSqlAnalysis
+) -> tuple[ObjectProperty, ...]:
+    """Serialize fragment evidence without requiring relation-schema changes."""
+
+    fragment = analysis.fragment
+    prefix = f"embedded_sql.{index}"
+    values = [
+        ObjectProperty(
+            property_name=f"{prefix}.property", property_value=fragment.property_name
+        ),
+        ObjectProperty(
+            property_name=f"{prefix}.role", property_value=fragment.role.value
+        ),
+        ObjectProperty(
+            property_name=f"{prefix}.status", property_value=analysis.status.value
+        ),
+        ObjectProperty(
+            property_name=f"{prefix}.raw_sql", property_value=fragment.raw_sql
+        ),
+        ObjectProperty(
+            property_name=f"{prefix}.source_root", property_value=fragment.source_root
+        ),
+        ObjectProperty(
+            property_name=f"{prefix}.source_file", property_value=fragment.source_file
+        ),
+        ObjectProperty(
+            property_name=f"{prefix}.xml_context", property_value=fragment.xml_context
+        ),
+    ]
+    if fragment.connection_name:
+        values.append(
+            ObjectProperty(
+                property_name=f"{prefix}.connection",
+                property_value=fragment.connection_name,
+            )
+        )
+    values.extend(
+        ObjectProperty(
+            property_name=f"{prefix}.unresolved_reference", property_value=value
+        )
+        for value in analysis.unresolved_references
+    )
+    values.extend(
+        ObjectProperty(property_name=f"{prefix}.error", property_value=value)
+        for value in analysis.errors
+    )
     return tuple(values)
