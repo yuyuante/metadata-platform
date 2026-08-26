@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from emip.domain import (
     MetadataObject,
+    ObjectProperty,
     ObjectType,
     RelationCandidate,
     RelationType,
@@ -22,9 +23,11 @@ from emip.identity import (
 _PHYSICAL_TYPES = frozenset(
     {ObjectType.TABLE, ObjectType.VIEW, ObjectType.MATERIALIZED_VIEW}
 )
+_CALLABLE_TYPES = frozenset({ObjectType.FUNCTION, ObjectType.PROCEDURE})
 _DEFINITION_TYPES = frozenset(
     {ObjectType.SOURCE_DEFINITION, ObjectType.TARGET_DEFINITION}
 )
+_EMBEDDED_SQL_SOURCE_TYPE = "INFORMATICA_EMBEDDED_SQL"
 
 
 _INFORMATICA_PREFIXES = ("sc_svel_", "sc_", "svel_", "src_", "tgt_")
@@ -37,6 +40,31 @@ _INFORMATICA_SUFFIXES = (
     "_del",
     "_upd",
 )
+
+
+def _unique_physical_match(
+    value: str,
+    physical: dict[tuple[str, ...], list[MetadataObject]],
+    allowed_types: frozenset[ObjectType] = _PHYSICAL_TYPES,
+) -> MetadataObject | None:
+    """Use the strongest available identity tier and reject ambiguity."""
+
+    parts = normalize_identifier(value)
+    if not parts:
+        return None
+    keys = [parts]
+    if len(parts) > 2:
+        keys.append(parts[-2:])
+    if len(parts) > 1:
+        keys.append((parts[-1],))
+    for key in keys:
+        matches = {str(item.object_id): item for item in physical.get(key, ())}
+        if len(matches) == 1:
+            target = next(iter(matches.values()))
+            return target if target.object_type in allowed_types else None
+        if len(matches) > 1:
+            return None
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +173,12 @@ class MetadataIntegrationService:
         for item in physical_by_identity.values():
             for key in physical_identity_keys(item.qualified_name):
                 physical[key].append(item)
-        created = 0
+        dependencies = defaultdict(list, physical)
+        for item in existing_physical_objects + objects:
+            if item.object_type in _CALLABLE_TYPES:
+                for key in physical_identity_keys(item.qualified_name):
+                    dependencies[key].append(item)
+        created = self._resolve_embedded_sql_links(objects, dependencies)
         for definition in objects:
             if definition.object_type not in _DEFINITION_TYPES:
                 continue
@@ -172,6 +205,59 @@ class MetadataIntegrationService:
             if candidate not in definition.relation_candidates:
                 definition.relation_candidates += (candidate,)
                 created += 1
+        return created
+
+    @staticmethod
+    def _resolve_embedded_sql_links(
+        objects: list[MetadataObject],
+        physical: dict[tuple[str, ...], list[MetadataObject]],
+    ) -> int:
+        """Resolve embedded references by strongest identity without guessing."""
+
+        created = 0
+        for item in objects:
+            resolved: list[RelationCandidate] = []
+            unresolved_names: list[str] = []
+            for candidate in item.relation_candidates:
+                if candidate.source_type != _EMBEDDED_SQL_SOURCE_TYPE:
+                    resolved.append(candidate)
+                    continue
+                target = _unique_physical_match(
+                    candidate.target_qualified_name,
+                    physical,
+                    (
+                        _CALLABLE_TYPES
+                        if candidate.relation_type is RelationType.CALLS
+                        else _PHYSICAL_TYPES
+                    ),
+                )
+                if target is None:
+                    unresolved_names.append(candidate.target_qualified_name)
+                    continue
+                resolved.append(
+                    RelationCandidate(
+                        candidate.source_qualified_name,
+                        target.qualified_name,
+                        candidate.relation_type,
+                        candidate.source_type,
+                        candidate.evidence_sql,
+                    )
+                )
+                created += 1
+            item.relation_candidates = tuple(dict.fromkeys(resolved))
+            existing_unresolved = {
+                prop.property_value
+                for prop in item.properties
+                if prop.property_name == "embedded_sql.unresolved_identity"
+            }
+            item.properties += tuple(
+                ObjectProperty(
+                    property_name="embedded_sql.unresolved_identity",
+                    property_value=name,
+                )
+                for name in dict.fromkeys(unresolved_names)
+                if name not in existing_unresolved
+            )
         return created
 
     @staticmethod

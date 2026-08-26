@@ -132,6 +132,94 @@ def test_does_not_link_ambiguous_cross_provider_identity() -> None:
     assert not target.relation_candidates
 
 
+def test_resolves_embedded_sql_by_strongest_physical_identity() -> None:
+    dbo_table = _object(ObjectType.TABLE, "dbo.STKOUT", "STKOUT")
+    archive_table = _object(ObjectType.TABLE, "archive.STKOUT", "STKOUT")
+    qualifier = _object(ObjectType.SOURCE_QUALIFIER, "F::M::SQ", "SQ")
+    qualifier.relation_candidates = (
+        RelationCandidate(
+            qualifier.qualified_name,
+            "dbo.STKOUT",
+            RelationType.READS,
+            "INFORMATICA_EMBEDDED_SQL",
+            "evidence",
+        ),
+    )
+
+    result = MetadataIntegrationService().integrate(
+        [dbo_table, archive_table, qualifier]
+    )
+
+    assert result.cross_provider_links_created == 1
+    assert qualifier.relation_candidates[0].target_qualified_name == "dbo.STKOUT"
+
+
+def test_drops_ambiguous_embedded_sql_identity_and_retains_finding() -> None:
+    dbo_table = _object(ObjectType.TABLE, "dbo.STKOUT", "STKOUT")
+    archive_table = _object(ObjectType.TABLE, "archive.STKOUT", "STKOUT")
+    qualifier = _object(ObjectType.SOURCE_QUALIFIER, "F::M::SQ", "SQ")
+    qualifier.relation_candidates = (
+        RelationCandidate(
+            qualifier.qualified_name,
+            "STKOUT",
+            RelationType.READS,
+            "INFORMATICA_EMBEDDED_SQL",
+            "evidence",
+        ),
+    )
+
+    result = MetadataIntegrationService().integrate(
+        [dbo_table, archive_table, qualifier]
+    )
+
+    assert result.cross_provider_links_created == 0
+    assert not qualifier.relation_candidates
+    assert any(
+        prop.property_name == "embedded_sql.unresolved_identity"
+        and prop.property_value == "STKOUT"
+        for prop in qualifier.properties
+    )
+
+
+def test_embedded_sql_resolution_is_idempotent() -> None:
+    table = _object(ObjectType.TABLE, "dbo.Customer", "Customer")
+    qualifier = _object(ObjectType.SOURCE_QUALIFIER, "F::M::SQ", "SQ")
+    candidate = RelationCandidate(
+        qualifier.qualified_name,
+        "dbo.Customer",
+        RelationType.READS,
+        "INFORMATICA_EMBEDDED_SQL",
+        "evidence",
+    )
+    qualifier.relation_candidates = (candidate, candidate)
+
+    service = MetadataIntegrationService()
+    service.integrate([table, qualifier])
+    service.integrate([table, qualifier])
+
+    assert len(qualifier.relation_candidates) == 1
+
+
+def test_resolves_embedded_sql_call_to_procedure_only() -> None:
+    procedure = _object(ObjectType.PROCEDURE, "dbo.Refresh", "Refresh")
+    component = _object(ObjectType.TARGET_DEFINITION, "F::S::T", "T")
+    component.relation_candidates = (
+        RelationCandidate(
+            component.qualified_name,
+            "dbo.Refresh",
+            RelationType.CALLS,
+            "INFORMATICA_EMBEDDED_SQL",
+            "evidence",
+        ),
+    )
+
+    result = MetadataIntegrationService().integrate([procedure, component])
+
+    assert result.cross_provider_links_created == 1
+    assert component.relation_candidates[0].target_qualified_name == "dbo.Refresh"
+    assert component.relation_candidates[0].relation_type is RelationType.CALLS
+
+
 def test_reports_dangling_and_self_relations() -> None:
     item = _object(ObjectType.WORKFLOW, "F::W", "W")
     item.relation_candidates = item.relation_candidates + (
