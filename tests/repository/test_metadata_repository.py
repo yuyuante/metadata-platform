@@ -89,6 +89,85 @@ def test_insert_columns_uses_parent_object_id_for_foreign_key() -> None:
     assert cursor.params[0][1] == str(parent_id)
 
 
+def test_insert_columns_persists_one_deterministic_row_per_column_name() -> None:
+    class Cursor:
+        params: list[tuple[object, ...]] = []
+
+        def executemany(self, query: object, params: list[tuple[object, ...]]) -> None:
+            del query
+            self.params = params
+
+    repository = MetadataRepository.__new__(MetadataRepository)
+    repository._column_table_identifier = sql.Identifier("emip_column")
+    cursor = Cursor()
+    parent_id = uuid4()
+    first_id = uuid4()
+    duplicate_id = uuid4()
+    columns = (
+        Column(
+            column_id=first_id,
+            object_id=parent_id,
+            column_name="duplicate_name",
+            ordinal_position=1,
+        ),
+        Column(
+            column_id=duplicate_id,
+            object_id=parent_id,
+            column_name="duplicate_name",
+            ordinal_position=2,
+        ),
+        Column(
+            object_id=parent_id,
+            column_name="another_name",
+            ordinal_position=3,
+        ),
+    )
+
+    repository._insert_columns(cursor, parent_id, columns)
+
+    assert [row[2] for row in cursor.params] == ["duplicate_name", "another_name"]
+    assert cursor.params[0][0] == str(first_id)
+    assert cursor.params[0][3] == 1
+
+
+@pytest.mark.parametrize(
+    ("catalog_result", "expected"),
+    [("emip_column", True), (None, False)],
+)
+def test_has_table_uses_catalog_lookup_without_undefined_table_probe(
+    catalog_result: str | None, expected: bool
+) -> None:
+    class Cursor:
+        query: object | None = None
+        params: object | None = None
+
+        def __enter__(self) -> "Cursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def execute(self, query: object, params: object) -> None:
+            self.query = query
+            self.params = params
+
+        def fetchone(self) -> tuple[str | None]:
+            return (catalog_result,)
+
+    class Connection:
+        cursor_instance = Cursor()
+
+        def cursor(self) -> Cursor:
+            return self.cursor_instance
+
+    repository = MetadataRepository.__new__(MetadataRepository)
+    repository._connection = Connection()
+
+    assert repository._has_table("EMIP_COLUMN") is expected
+    assert repository._connection.cursor_instance.query == "SELECT to_regclass(%s)"
+    assert repository._connection.cursor_instance.params == ("emip_column",)
+
+
 def test_create_relations_uses_one_relation_load_and_resolves_session_child() -> None:
     class Cursor:
         def __enter__(self) -> "Cursor":

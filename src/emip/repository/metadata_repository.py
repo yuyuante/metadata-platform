@@ -197,9 +197,9 @@ class MetadataRepository:
         self._source_location_table_identifier = sql.Identifier(
             *(part.lower() for part in qualified_source_location_table.split("."))
         )
-        self._column_table_available = self._has_table(self._column_table_identifier)
+        self._column_table_available = self._has_table(qualified_column_table)
         self._source_location_table_available = self._has_table(
-            self._source_location_table_identifier
+            qualified_source_location_table
         )
         self._persistence_objects_by_id: dict[UUID, MetadataObject] | None = None
         self._persistence_objects_by_identity: (
@@ -212,17 +212,17 @@ class MetadataRepository:
 
         return self._column_table_available
 
-    def _has_table(self, table_identifier: sql.Composable) -> bool:
-        """Check optional metadata tables without making a transaction fail."""
+    def _has_table(self, qualified_table: str) -> bool:
+        """Check optional tables without generating an UndefinedTable error."""
 
-        query = sql.SQL("SELECT 1 FROM {} LIMIT 0").format(table_identifier)
-        try:
-            with self._connection.cursor() as cursor:
-                self._execute(cursor, query)
-        except psycopg2.errors.UndefinedTable:
-            self._connection.rollback()
-            return False
-        return True
+        with self._connection.cursor() as cursor:
+            self._execute(
+                cursor,
+                "SELECT to_regclass(%s)",
+                (qualified_table.lower(),),
+            )
+            row = cursor.fetchone()
+        return row is not None and row[0] is not None
 
     def _observe(self, event: str, amount: int = 1) -> None:
         observer = getattr(self, "_observer", None)
@@ -614,8 +614,10 @@ class MetadataRepository:
     ) -> None:
         """Insert column metadata in the current object transaction."""
 
-        if not columns:
+        unique_columns = tuple(dict.fromkeys(column.column_name for column in columns))
+        if not unique_columns:
             return
+        columns_by_name = {column.column_name: column for column in reversed(columns)}
         query = sql.SQL(
             "INSERT INTO {} ({}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
         ).format(self._column_table_identifier, _COLUMN_RETURNING_COLUMNS)
@@ -634,7 +636,8 @@ class MetadataRepository:
                     column.is_primary_key,
                     column.is_unique,
                 )
-                for column in columns
+                for column_name in unique_columns
+                for column in (columns_by_name[column_name],)
             ],
         )
 
@@ -741,19 +744,18 @@ class MetadataRepository:
     def _load_columns(self, object_id: UUID) -> tuple[Column, ...]:
         """Load columns while remaining compatible with pre-migration databases."""
 
+        if not self._column_table_available:
+            return ()
+
         query = sql.SQL(
             "SELECT {} FROM {} WHERE object_id = %s ORDER BY ordinal_position"
         ).format(
             _COLUMN_RETURNING_COLUMNS,
             self._column_table_identifier,
         )
-        try:
-            with self._connection.cursor() as cursor:
-                self._execute(cursor, query, (str(object_id),))
-                rows = cursor.fetchall()
-        except psycopg2.errors.UndefinedTable:
-            self._connection.rollback()
-            return ()
+        with self._connection.cursor() as cursor:
+            self._execute(cursor, query, (str(object_id),))
+            rows = cursor.fetchall()
         return tuple(_row_to_column(row) for row in rows)
 
     def _load_columns_for_objects(

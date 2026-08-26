@@ -24,6 +24,9 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"emip.web" = ["static/*"]
+
 [tool.black]
 line-length = 88
 target-version = ["py313"]

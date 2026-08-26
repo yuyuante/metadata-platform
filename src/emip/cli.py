@@ -17,6 +17,7 @@ from emip.services.metadata_integration import (
     render_integration_report,
 )
 from emip.services.query_engine import QueryEngine, tree_lines
+from emip.web import StaticWebExporter
 
 
 def _print_persistence_progress(message: str) -> None:
@@ -273,6 +274,11 @@ def _build_parser() -> argparse.ArgumentParser:
     source_parser = query_commands.add_parser("source")
     source_parser.add_argument("term")
     add_json_option(source_parser)
+    web_parser = subparsers.add_parser("web")
+    web_commands = web_parser.add_subparsers(dest="web_command", required=True)
+    export_parser = web_commands.add_parser("export")
+    export_parser.add_argument("--output", type=Path, default=Path("web-dist"))
+    export_parser.add_argument("--depth", type=int, default=6)
     return parser
 
 
@@ -434,6 +440,27 @@ def run_query(args: argparse.Namespace) -> int:
         return 1
 
 
+def run_web_export(
+    args: argparse.Namespace, exporter: StaticWebExporter | None = None
+) -> int:
+    """Export repository metadata for the browser-only developer application."""
+
+    try:
+        generator = exporter or StaticWebExporter(MetadataRepository())
+        print(f"Exporting static developer web to: {args.output}", flush=True)
+        statistics = generator.export(args.output, depth=args.depth)
+    except (OSError, ValueError) as error:
+        print(f"Web export failed: {error}")
+        return 1
+    print("Static developer web export completed.")
+    print(f"Objects : {statistics.object_count}")
+    print(f"Details : {statistics.detail_count}")
+    print(f"Flows   : {statistics.flow_count}")
+    print(f"Elapsed : {statistics.elapsed_seconds:.2f} sec")
+    print(f"Size    : {statistics.output_bytes} bytes")
+    return 0
+
+
 def main() -> int:
     """Parse command-line arguments and execute the selected command."""
 
@@ -442,4 +469,6 @@ def main() -> int:
         return run_scan(args.folder, profile=args.profile)
     if args.command == "query":
         return run_query(args)
+    if args.command == "web" and args.web_command == "export":
+        return run_web_export(args)
     return 1
