@@ -8,6 +8,9 @@ written and no recursive production scan was run. The production sample was a
 fixed set of nine XML exports under `D:\workplace\infa_fs2\xml`, selected to cover
 all four supported SQL properties and the named regressions from Issue 12.
 
+The PR review follow-up did not repeat that production sample. It used focused
+service tests plus an in-memory repository round trip described below.
+
 ## Production sample
 
 | Export | Objects | SQL fragments | Candidate relations | Statuses |
@@ -44,6 +47,11 @@ comments-only SQL) and are retained as evidence.
   in the sampled XML.
 - `wf_MBAH_SYNC` kept the Post SQL write through `ODBC_SQL_SVELAH` independent
   from the Source Qualifier read through `ODBC_SQL_SVEL`.
+- Embedded SQL identity resolution now treats the captured connection as a hard
+  scope. It maps conservative connection aliases to the physical object's
+  provider, database, schema, or explicit connection property; a unique object
+  on the wrong connection remains unresolved, and a conflicting qualified-name
+  tier cannot fall through to an unrelated short-name match.
 - The named `AI7101B` and `AI7101D` exports parsed without structural regression;
   each yielded two analyzed SQL fragments and five candidate relations.
 - Runtime table parameters such as `$$TABLE_NAME` are covered by focused tests:
@@ -64,3 +72,13 @@ The richer per-fragment status/error/unresolved details are also stored on the
 origin metadata object's indexed `embedded_sql.*` properties. This intentionally
 adds no column-level lineage and makes no exact edge when physical identity is
 ambiguous or unresolved.
+
+A targeted regression parses one Source Qualifier query and one Target Pre SQL
+statement with `ODBC_SQL_SVEL`, resolves them to `SVEL` physical tables while a
+same-named `SVELAH` table competes, and persists the five objects plus their
+`READS`/`WRITES` relations through
+`MetadataObjectPersister`, then reloads detached copies from the repository.
+`QueryEngine.depends`, `used_by`, and `flow` all expose the persisted embedded-SQL
+lineage, including the `INFORMATICA_EMBEDDED_SQL` source type. This exercises the
+repository/consumer boundary without a production scan or production database
+write.

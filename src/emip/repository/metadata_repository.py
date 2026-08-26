@@ -1062,12 +1062,17 @@ class MetadataRepository:
                     if source_object and source_object.object_type is ObjectType.MAPPING
                     else None
                 )
+                target_system_name = candidate.target_system_name or source.system_name
                 target = objects_by_identity.get(
                     (
-                        source.system_name,
+                        target_system_name,
                         normalize_identifier(candidate.target_qualified_name),
                     )
-                ) or resolve_endpoint(candidate.target_qualified_name, related_mapping)
+                )
+                if target is None and candidate.target_system_name is None:
+                    target = resolve_endpoint(
+                        candidate.target_qualified_name, related_mapping
+                    )
                 if source_object is None or target is None:
                     continue
                 if source_object.object_id == target.object_id:

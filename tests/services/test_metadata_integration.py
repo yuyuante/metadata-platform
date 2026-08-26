@@ -1,3 +1,5 @@
+import json
+
 from emip.domain import (
     MetadataObject,
     ObjectProperty,
@@ -11,8 +13,27 @@ from emip.services.metadata_integration import (
 )
 
 
-def _object(kind: ObjectType, qualified_name: str, name: str) -> MetadataObject:
-    return MetadataObject.create(kind, "TEST", qualified_name, name)
+def _object(
+    kind: ObjectType,
+    qualified_name: str,
+    name: str,
+    provider: str = "TEST",
+) -> MetadataObject:
+    return MetadataObject.create(kind, provider, qualified_name, name)
+
+
+def _embedded_candidate(
+    source: MetadataObject,
+    target: str,
+    connection: str,
+) -> RelationCandidate:
+    return RelationCandidate(
+        source.qualified_name,
+        target,
+        RelationType.READS,
+        "INFORMATICA_EMBEDDED_SQL",
+        json.dumps({"connection": connection}),
+    )
 
 
 def test_normalize_identifier_supports_sql_quoting() -> None:
@@ -179,6 +200,58 @@ def test_drops_ambiguous_embedded_sql_identity_and_retains_finding() -> None:
         and prop.property_value == "STKOUT"
         for prop in qualifier.properties
     )
+
+
+def test_resolves_embedded_sql_with_matching_connection_provider() -> None:
+    source_table = _object(ObjectType.TABLE, "dbo.STKOUT", "STKOUT", "SVEL")
+    other_table = _object(ObjectType.TABLE, "dbo.STKOUT", "STKOUT", "SVELAH")
+    qualifier = _object(ObjectType.SOURCE_QUALIFIER, "F::M::SQ", "SQ")
+    qualifier.relation_candidates = (
+        _embedded_candidate(qualifier, "dbo.STKOUT", "ODBC_SQL_SVEL"),
+    )
+
+    result = MetadataIntegrationService().integrate(
+        [source_table, other_table, qualifier]
+    )
+
+    assert result.cross_provider_links_created == 1
+    assert qualifier.relation_candidates[0].target_qualified_name == "dbo.STKOUT"
+    assert qualifier.relation_candidates[0].target_system_name == "SVEL"
+    assert qualifier.relation_candidates[0].relation_type is RelationType.READS
+
+
+def test_does_not_resolve_unique_name_through_wrong_connection() -> None:
+    wrong_table = _object(ObjectType.TABLE, "dbo.STKOUT", "STKOUT", "SVELAH")
+    qualifier = _object(ObjectType.SOURCE_QUALIFIER, "F::M::SQ", "SQ")
+    qualifier.relation_candidates = (
+        _embedded_candidate(qualifier, "STKOUT", "ODBC_SQL_SVEL"),
+    )
+
+    result = MetadataIntegrationService().integrate([wrong_table, qualifier])
+
+    assert result.cross_provider_links_created == 0
+    assert not qualifier.relation_candidates
+    assert any(
+        prop.property_name == "embedded_sql.unresolved_identity"
+        and prop.property_value == "STKOUT"
+        for prop in qualifier.properties
+    )
+
+
+def test_does_not_fall_back_past_wrong_connection_at_explicit_schema_tier() -> None:
+    dbo_wrong = _object(ObjectType.TABLE, "dbo.STKOUT", "STKOUT", "SVELAH")
+    archive_right = _object(ObjectType.TABLE, "archive.STKOUT", "STKOUT", "SVEL")
+    qualifier = _object(ObjectType.SOURCE_QUALIFIER, "F::M::SQ", "SQ")
+    qualifier.relation_candidates = (
+        _embedded_candidate(qualifier, "dbo.STKOUT", "ODBC_SQL_SVEL"),
+    )
+
+    result = MetadataIntegrationService().integrate(
+        [dbo_wrong, archive_right, qualifier]
+    )
+
+    assert result.cross_provider_links_created == 0
+    assert not qualifier.relation_candidates
 
 
 def test_embedded_sql_resolution_is_idempotent() -> None:
