@@ -177,7 +177,10 @@ class InformaticaParameterResolver:
         )
 
     def substitute_sql(self, sql: str) -> ParameterSubstitution:
-        """Replace exact tokens outside SQL strings and comments."""
+        """Replace exact tokens outside SQL strings and comments.
+
+        Double-quoted SQL identifiers remain eligible for substitution.
+        """
 
         output: list[str] = []
         resolutions: list[ParameterResolution] = []
@@ -221,10 +224,28 @@ class InformaticaParameterResolver:
                 output.append(pair)
                 index += 2
                 continue
-            elif state in {"single_quote", "double_quote"}:
-                quote = "'" if state == "single_quote" else '"'
-                if char == quote:
-                    if index + 1 < len(sql) and sql[index + 1] == quote:
+            elif state == "double_quote":
+                match = _PARAMETER.match(sql, index)
+                if match:
+                    resolution = self.resolve(match.group())
+                    resolutions.append(resolution)
+                    output.append(
+                        resolution.value
+                        if resolution.status is ParameterResolutionStatus.EXACT
+                        and resolution.value is not None
+                        else match.group()
+                    )
+                    index = match.end()
+                    continue
+                if char == '"':
+                    if index + 1 < len(sql) and sql[index + 1] == '"':
+                        output.append(sql[index : index + 2])
+                        index += 2
+                        continue
+                    state = "code"
+            elif state == "single_quote":
+                if char == "'":
+                    if index + 1 < len(sql) and sql[index + 1] == "'":
                         output.append(sql[index : index + 2])
                         index += 2
                         continue

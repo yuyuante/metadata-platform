@@ -143,6 +143,38 @@ def test_token_aware_substitution_skips_literals_comments_and_runtime_values(
     assert statuses["$$DYNAMIC"] is ParameterResolutionStatus.UNRESOLVED
 
 
+def test_token_aware_substitution_resolves_double_quoted_identifiers_conservatively(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "quoted-identifiers.txt"
+    path.write_text(
+        "[Global]\n$$SCHEMA=dbo\n$$TABLE=SourceTable\n"
+        "$$CONFLICT=First\n$$CONFLICT=Second\n",
+        encoding="utf-8",
+    )
+
+    result = _resolver(path).substitute_sql(
+        'SELECT * FROM "$$SCHEMA"."$$TABLE" '
+        'JOIN "$$MISSING" m ON 1=1 JOIN "$$CONFLICT" c ON 1=1 '
+        "WHERE label = '$$TABLE' -- \"$$SCHEMA\"\n"
+        '/* "$$TABLE" */'
+    )
+
+    assert 'FROM "dbo"."SourceTable"' in result.resolved_sql
+    assert 'JOIN "$$MISSING"' in result.resolved_sql
+    assert 'JOIN "$$CONFLICT"' in result.resolved_sql
+    assert "label = '$$TABLE'" in result.resolved_sql
+    assert '-- "$$SCHEMA"' in result.resolved_sql
+    assert '/* "$$TABLE" */' in result.resolved_sql
+    statuses = {item.token: item.status for item in result.resolutions}
+    assert statuses == {
+        "$$SCHEMA": ParameterResolutionStatus.EXACT,
+        "$$TABLE": ParameterResolutionStatus.EXACT,
+        "$$MISSING": ParameterResolutionStatus.UNRESOLVED,
+        "$$CONFLICT": ParameterResolutionStatus.CONFLICT,
+    }
+
+
 def test_parameter_file_cache_reads_each_resolved_path_once(tmp_path: Path) -> None:
     parameter_file = tmp_path / "infa_aprun" / "APP" / "params.txt"
     parameter_file.parent.mkdir(parents=True)
