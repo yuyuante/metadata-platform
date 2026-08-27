@@ -17,7 +17,9 @@ it did not run a parser scan, repository reconciliation, or static web export.
 
 ### Parameter sources actually observed
 
-1. Session `ATTRIBUTE` elements named `Parameter Filename` in exported XML.
+1. Workflow and session `ATTRIBUTE` elements named `Parameter Filename` in
+   exported XML. The targeted SPAN sample stores it on the workflow and its
+   sessions inherit that unique reference.
    Non-empty examples include:
    - `/infa_aprun/SPAN/Parameters/spanvar.txt`
    - `/infa_aprun/comm/Parameters/monvar.txt`
@@ -57,9 +59,10 @@ PowerCenter parameter files use `.txt` names.
   declaration.
 - The section header provides folder, workflow, and optionally session
   identity when those components are present.
-- A session's `Parameter Filename` XML attribute identifies which file applies
-  to that session. Resolution must therefore start from the originating
-  session/component, never from a global parameter-name lookup.
+- A session's own `Parameter Filename`, or a unique workflow-level reference
+  inherited by that session, identifies which file applies. Resolution starts
+  from the originating session/component, never from a global parameter-name
+  lookup.
 - Source, target, and lookup connection properties already remain independent
   in the Milestone-011 pipeline. A future exact connection parameter must be
   substituted into the corresponding role only.
@@ -90,22 +93,58 @@ must use synthetic values, and PR evidence must redact secrets. Parameter
 evidence should preserve source file, line, section/scope, environment, raw
 value, normalized value, and status internally without logging secret values.
 
-### Unresolved inventory gaps
+## Implemented resolution boundary
+
+- Parse the observed INI-like `.txt` syntax with comments, blank values,
+  diagnostics, line evidence, and Global/workflow/session scope identities.
+- Resolve only static literal values from the exact located file using
+  session > workflow > global precedence. Same-tier disagreement is a conflict.
+- Inherit one workflow parameter-file reference when a session does not provide
+  its own; a session reference takes precedence. Multiple references are not
+  guessed.
+- Substitute complete `$$name` tokens outside SQL literals and comments while
+  retaining both raw and resolved SQL plus structured resolution evidence.
+- Resolve source, target, and lookup connection parameters independently and
+  carry the exact connection into provider-aware physical identity matching.
+- Cache parameter-file parsing by resolved path for a scan/parser lifetime.
+
+## Targeted production evidence (2026-08-27)
+
+No full production scan was run. `SPAN/wf_SB_0000010.xml` was parsed directly:
+
+- 268 metadata objects and 121 pre-integration relation candidates;
+- seven sessions inherited `/infa_aprun/SPAN/Parameters/spanvar.txt` from the
+  workflow; no parameter-file diagnostics;
+- two embedded-SQL fragments, neither containing a `$$` SQL identifier, so no
+  resolved SQL was fabricated.
+
+The referenced `spanvar.txt` was parsed separately without printing values:
+45 definitions, zero diagnostics, one Global and 44 session-scoped entries;
+33 static literals and 12 blank/runtime entries. Production values were not
+logged because parameter files can contain credentials.
+
+## Validation and round trip
+
+Focused parser tests cover syntax, scope precedence, conflicts, token-aware SQL
+substitution, runtime values, cache reuse, workflow inheritance, parameterized
+connections, provider isolation, and unresolved safety. A repository round-trip
+test persists parameter-resolved lineage, reloads detached objects/relations,
+and proves `depends`/`used_by` queries select SVEL while rejecting the same-name
+SVELAH object. Persisted object properties retain raw SQL, resolved SQL, EXACT
+status, and Production environment evidence.
+
+### Known limitations
 
 - Referenced `/infa_target/...` files are not present under the inspected
   project snapshot.
 - No authoritative mapping for `$PMTargetFileDir` was found.
-- No production example of an object/schema/connection parameter used by a
-  Milestone-011 SQL fragment has yet been verified; this remains the first
-  targeted inventory task for the next work session.
-- Comment syntax and escaping rules require confirmation from an available
-  real file before parser support is generalized.
+- The inspected production SQL fragments did not contain an object/schema or
+  connection `$$` token, so exact resolved lineage is proven with synthetic
+  regression fixtures rather than claimed from production.
+- XML mapping defaults and workflow-variable assignments are inventoried but
+  are not evaluated: many are blank or runtime expressions, and no safe general
+  precedence was established from the inspected sources.
+- Mapping-definition SQL without one unambiguous originating session is not
+  parameter-substituted because no exact parameter-file context can be proven.
 - Worklet-specific parameter-file precedence and multiple environment graph
   variants have not yet been evidenced.
-
-## Resume point
-
-Continue with a targeted search for a production embedded-SQL fragment that
-contains an object/schema/connection parameter and trace it to its referenced
-available parameter file. Then implement the smallest parser/resolver semantics
-proved by this inventory, with tests before integration.
