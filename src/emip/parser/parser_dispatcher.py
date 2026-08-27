@@ -16,6 +16,7 @@ class ParserDispatcher:
 
     def __init__(self, profiler: Any | None = None) -> None:
         self._profiler = profiler
+        self._informatica_parser = InformaticaMetadataParser(profiler)
 
     def get_parser(self, path: Path) -> SqlDdlParser | InformaticaMetadataParser | None:
         """Return the SQL DDL parser or ``None`` for unsupported files."""
@@ -23,7 +24,7 @@ class ParserDispatcher:
         if path.suffix.lower() == ".sql":
             return SqlDdlParser(self._profiler)
         if path.suffix.lower() == ".xml":
-            return InformaticaMetadataParser(self._profiler)
+            return self._informatica_parser
         return None
 
     def dispatch(self, path: Path) -> SqlDdlParser | InformaticaMetadataParser | None:
