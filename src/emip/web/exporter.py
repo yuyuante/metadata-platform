@@ -20,6 +20,7 @@ from uuid import UUID
 from emip.domain import MetadataObject, Relation
 from emip.scanner.file_reader import FileReader
 from emip.services.data_flow import DataFlowService
+from emip.services.dynamic_sql_details import dynamic_sql_details
 from emip.services.source_traceability import SourceTraceabilityService
 
 
@@ -307,6 +308,7 @@ def _detail_payload(
                 ),
             )
         ],
+        "dynamic_sql": dynamic_sql_details(item),
         "columns": [
             {
                 "name": value.column_name,

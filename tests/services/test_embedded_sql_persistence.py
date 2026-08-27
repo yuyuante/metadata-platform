@@ -11,6 +11,7 @@ from emip.domain import (
     RelationType,
 )
 from emip.parser.informatica.xml_parser import InformaticaMetadataParser
+from emip.parser.sql_ddl_parser import SqlDdlParser
 from emip.repository.metadata_persister import MetadataObjectPersister
 from emip.repository.metadata_repository import MetadataRepository
 from emip.services.metadata_integration import MetadataIntegrationService
@@ -69,6 +70,38 @@ class RoundTripRepository:
 
     def find_relations(self) -> list[Relation]:
         return deepcopy(self.relations)
+
+
+def test_dynamic_sql_evidence_and_exact_lineage_survive_persistence_reload(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "warehouse.sql"
+    path.write_text(
+        "CREATE PROCEDURE sales.refresh AS " "EXEC('SELECT * FROM sales.customer');",
+        encoding="utf-8",
+    )
+    procedure = SqlDdlParser().parse(path)[0]
+    customer = MetadataObject.create(
+        ObjectType.TABLE, "warehouse", "sales.customer", "customer"
+    )
+    repository = RoundTripRepository()
+    persister = MetadataObjectPersister(cast(MetadataRepository, repository))
+
+    first = persister.persist([customer, procedure])
+    second = persister.persist([customer, procedure])
+    reloaded = QueryEngine(cast(QueryRepository, repository))
+    lookup = reloaded.object_lookup("sales.refresh")
+
+    assert first.objects_created == 2
+    assert second.objects_created == 0
+    assert lookup["dynamic_sql"]["classification"] == "DYNAMIC_EXACT"  # type: ignore[index]
+    assert lookup["dynamic_sql"]["evidence"][0]["source_file"] == (  # type: ignore[index]
+        "warehouse.sql"
+    )
+    assert any(
+        item["qualified_name"] == "sales.customer"
+        for item in reloaded.depends("sales.refresh")
+    )
 
 
 def test_embedded_sql_lineage_survives_persistence_reload_and_query(

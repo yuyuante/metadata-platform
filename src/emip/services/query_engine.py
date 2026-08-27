@@ -10,6 +10,7 @@ from uuid import UUID
 
 from emip.domain import MetadataObject, ObjectType, Relation, RelationType
 from emip.services.data_flow import DataFlowService
+from emip.services.dynamic_sql_details import dynamic_sql_details
 from emip.services.source_traceability import SourceTraceabilityService
 
 
@@ -47,7 +48,7 @@ def _qualified_parts(qualified_name: str) -> tuple[str, str]:
 
 def _object_dict(item: MetadataObject) -> dict[str, object]:
     database, schema = _qualified_parts(item.qualified_name)
-    return {
+    result: dict[str, object] = {
         "object_type": item.object_type.value,
         "qualified_name": item.qualified_name,
         "schema": schema,
@@ -59,6 +60,10 @@ def _object_dict(item: MetadataObject) -> dict[str, object]:
             prop.property_name: prop.property_value for prop in item.properties
         },
     }
+    dynamic_sql = dynamic_sql_details(item)
+    if dynamic_sql is not None:
+        result["dynamic_sql"] = dynamic_sql
+    return result
 
 
 def _relation_dict(relation: Relation) -> dict[str, object]:

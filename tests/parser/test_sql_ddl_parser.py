@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -375,11 +376,16 @@ def test_resolves_literal_and_constant_variable_dynamic_sql(tmp_path: Path) -> N
     properties = _properties(obj)
 
     assert properties["dynamic_sql_status"] == "RESOLVED"
+    assert properties["dynamic_sql.classification"] == "DYNAMIC_EXACT"
     assert any(
         candidate.target_qualified_name == "sales.customer"
         and candidate.source_type == "RESOLVED_DYNAMIC_SQL"
         for candidate in obj.relation_candidates
     )
+    evidence = json.loads(properties["dynamic_sql.evidence"])
+    assert evidence[0]["source_file"] == "warehouse.sql"
+    assert evidence[0]["source_object"] == "sales.refresh"
+    assert evidence[0]["reconstructed_sql"] == "SELECT * FROM sales.customer"
 
 
 def test_unresolved_dynamic_sql_keeps_marker_without_relations(tmp_path: Path) -> None:
@@ -394,8 +400,59 @@ def test_unresolved_dynamic_sql_keeps_marker_without_relations(tmp_path: Path) -
     properties = _properties(obj)
 
     assert properties["dynamic_sql_status"] == "UNRESOLVED"
+    assert properties["dynamic_sql.classification"] == "UNRESOLVED"
+    assert properties["dynamic_sql.unresolved_reason"] == "RUNTIME_VARIABLE_UNKNOWN"
     assert properties["dynamic_sql_source"] == sql
     assert obj.relation_candidates == ()
+
+
+def test_conditional_dynamic_literal_is_evidence_without_false_exact_edge(
+    tmp_path: Path,
+) -> None:
+    sql = """
+    CREATE PROCEDURE sales.refresh AS
+    BEGIN
+        IF enabled = 1 EXEC('SELECT * FROM secret.customer');
+    END;
+    """
+
+    obj = _parse(tmp_path, sql)[0]
+    properties = _properties(obj)
+
+    assert properties["dynamic_sql.classification"] == "POSSIBLE"
+    assert properties["dynamic_sql.unresolved_reason"] == "CONDITIONAL_AMBIGUITY"
+    assert all(
+        candidate.target_qualified_name != "secret.customer"
+        for candidate in obj.relation_candidates
+    )
+
+
+def test_unresolved_dynamic_text_does_not_hide_independent_static_lineage(
+    tmp_path: Path,
+) -> None:
+    sql = """
+    CREATE PROCEDURE sales.refresh AS
+    BEGIN
+        INSERT INTO "sales"."audit" SELECT * FROM "sales"."customer";
+        EXEC(@runtime_sql + ' FROM secret.customer');
+    END;
+    """
+
+    obj = _parse(tmp_path, sql)[0]
+    targets = {item.target_qualified_name for item in obj.relation_candidates}
+
+    assert {"sales.audit", "sales.customer"} <= targets
+    assert "secret.customer" not in targets
+
+
+def test_dynamic_parse_is_repeatable(tmp_path: Path) -> None:
+    sql = "CREATE PROCEDURE sales.refresh AS EXEC('SELECT * FROM sales.customer');"
+
+    first = _parse(tmp_path, sql)[0]
+    second = _parse(tmp_path, sql)[0]
+
+    assert _properties(first) == _properties(second)
+    assert first.relation_candidates == second.relation_candidates
 
 
 def test_trigger_preserves_update_of_columns(tmp_path: Path) -> None:

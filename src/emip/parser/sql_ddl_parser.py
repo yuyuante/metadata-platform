@@ -1,5 +1,6 @@
 """SQL DDL parser for canonical metadata objects."""
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,11 @@ from emip.domain import (
     RelationType,
 )
 from emip.identity import unquote_identifier
-from emip.parser.dynamic_sql_resolver import DynamicSqlResolver
+from emip.parser.dynamic_sql_resolver import (
+    DynamicSqlClassification,
+    DynamicSqlResolver,
+    mask_sql_literals_and_comments,
+)
 
 _SUPPORTED_TYPES: dict[str, ObjectType] = {
     "TABLE": ObjectType.TABLE,
@@ -57,24 +62,28 @@ class SqlDdlParser:
         source = path.read_text(encoding="utf-8")
         mssql_objects = _mssql_objects(path, source)
         if mssql_objects is not None:
-            objects = _with_relationships(mssql_objects, source)
+            objects = _with_relationships(mssql_objects, source, path)
             self._record_profile(objects)
             return objects
         if _is_create_function(source):
-            objects = _with_relationships([_function_object(path, source)], source)
+            objects = _with_relationships(
+                [_function_object(path, source)], source, path
+            )
             self._record_profile(objects)
             return objects
         if _is_create_procedure(source):
-            objects = _with_relationships([_procedure_object(path, source)], source)
+            objects = _with_relationships(
+                [_procedure_object(path, source)], source, path
+            )
             self._record_profile(objects)
             return objects
         if _is_create_trigger(source):
-            objects = _with_relationships([_trigger_object(path, source)], source)
+            objects = _with_relationships([_trigger_object(path, source)], source, path)
             self._record_profile(objects)
             return objects
         if _is_create_materialized_view(source):
             objects = _with_relationships(
-                [_materialized_view_object(path, source)], source
+                [_materialized_view_object(path, source)], source, path
             )
             self._record_profile(objects)
             return objects
@@ -118,7 +127,7 @@ class SqlDdlParser:
                     metadata_object.object_id,
                 )
             parsed_result.append(metadata_object)
-        parsed_result = _with_relationships(parsed_result, source)
+        parsed_result = _with_relationships(parsed_result, source, path)
         self._record_profile(parsed_result)
         return parsed_result
 
@@ -143,78 +152,114 @@ def _clean_ref(value: str) -> str:
 
 
 def _with_relationships(
-    objects: list[MetadataObject], source: str
+    objects: list[MetadataObject], source: str, path: Path
 ) -> list[MetadataObject]:
     """Attach conservative, evidence-backed relation candidates to parsed objects."""
     resolution = _DYNAMIC_SQL_RESOLVER.resolve(source)
     dynamic = resolution.contains_dynamic_sql
-    resolved_sql = resolution.resolved_sql
-    relation_sql = source
-    source_type = "STATIC_SQL"
-    if dynamic and resolved_sql is not None:
-        relation_sql = resolved_sql
-        source_type = "RESOLVED_DYNAMIC_SQL"
+    relation_sources = [(source, "STATIC_SQL", source)]
+    if dynamic:
+        # Literal and comment bodies are evidence, never independently exact SQL.
+        relation_sources[0] = (
+            mask_sql_literals_and_comments(source),
+            "STATIC_SQL",
+            source,
+        )
+    if resolution.classification is DynamicSqlClassification.DYNAMIC_EXACT:
+        assert resolution.resolved_sql is not None
+        relation_sources.append(
+            (
+                resolution.resolved_sql,
+                "RESOLVED_DYNAMIC_SQL",
+                resolution.resolved_sql,
+            )
+        )
     for obj in objects:
         candidates: list[RelationCandidate] = []
-        if dynamic and resolved_sql is None:
-            obj.properties = (
-                ObjectProperty(
-                    property_name="contains_dynamic_sql", property_value="true"
-                ),
-                ObjectProperty(
-                    property_name="dynamic_sql_source", property_value=source
-                ),
-            )
-            obj.properties += (
-                ObjectProperty(
-                    property_name="dynamic_sql_status",
-                    property_value=(
-                        "RESOLVED" if resolved_sql is not None else "UNRESOLVED"
+        if dynamic:
+            evidence = [
+                {
+                    "classification": item.classification.value,
+                    "contributing_values": list(item.contributing_values),
+                    "execution_construct": item.execution_construct,
+                    "original_statement": item.original_statement,
+                    "reconstructed_sql": item.reconstructed_sql,
+                    "source_file": path.name,
+                    "source_object": obj.qualified_name,
+                    "source_root": str(path.parent),
+                    "unresolved_reason": (
+                        item.unresolved_reason.value
+                        if item.unresolved_reason is not None
+                        else None
                     ),
-                ),
-            )
-        elif dynamic:
-            obj.properties = (
-                ObjectProperty(
-                    property_name="contains_dynamic_sql", property_value="true"
-                ),
-                ObjectProperty(
-                    property_name="dynamic_sql_source", property_value=source
-                ),
-            )
-            obj.properties += (
-                ObjectProperty(
-                    property_name="dynamic_sql_status",
-                    property_value=(
-                        "RESOLVED" if resolved_sql is not None else "UNRESOLVED"
+                }
+                for item in resolution.evidence
+            ]
+            properties = list(obj.properties)
+            properties.extend(
+                (
+                    ObjectProperty(
+                        property_name="contains_dynamic_sql", property_value="true"
                     ),
-                ),
+                    ObjectProperty(
+                        property_name="dynamic_sql_source", property_value=source
+                    ),
+                    ObjectProperty(
+                        property_name="dynamic_sql_status",
+                        property_value=(
+                            "RESOLVED"
+                            if resolution.classification
+                            is DynamicSqlClassification.DYNAMIC_EXACT
+                            else "UNRESOLVED"
+                        ),
+                    ),
+                    ObjectProperty(
+                        property_name="dynamic_sql.classification",
+                        property_value=resolution.classification.value,
+                    ),
+                    ObjectProperty(
+                        property_name="dynamic_sql.evidence",
+                        property_value=json.dumps(
+                            evidence,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                    ),
+                )
             )
+            if resolution.unresolved_reason is not None:
+                properties.append(
+                    ObjectProperty(
+                        property_name="dynamic_sql.unresolved_reason",
+                        property_value=resolution.unresolved_reason.value,
+                    )
+                )
+            obj.properties = tuple(properties)
 
         current_obj = obj
         current_candidates = candidates
 
-        def add(
-            pattern: str, kind: RelationType, evidence: str = relation_sql
-        ) -> None:  # noqa: B023
-            for match in re.finditer(pattern, relation_sql, re.I | re.S):
-                target = _clean_ref(match.group(1))
-                if target.upper() in {
-                    "SELECT",
-                    "VALUES",
-                    "DUAL",
-                    current_obj.qualified_name.upper(),  # noqa: B023
-                }:
-                    continue
-                current_candidates.append(  # noqa: B023
-                    RelationCandidate(
-                        current_obj.qualified_name,  # noqa: B023
-                        target,
-                        kind,
-                        source_type,
-                        evidence,
+        def add(pattern: str, kind: RelationType) -> None:  # noqa: B023
+            for relation_sql, source_type, evidence in relation_sources:
+                for match in re.finditer(pattern, relation_sql, re.I | re.S):
+                    target = _clean_ref(match.group(1))
+                    if target.upper() in {
+                        "SELECT",
+                        "VALUES",
+                        "DUAL",
+                        current_obj.qualified_name.upper(),  # noqa: B023
+                    }:
+                        continue
+                    current_candidates.append(  # noqa: B023
+                        RelationCandidate(
+                            current_obj.qualified_name,  # noqa: B023
+                            target,
+                            kind,
+                            source_type,
+                            evidence,
+                        )
                     )
-                )
 
         if obj.object_type in {
             ObjectType.VIEW,

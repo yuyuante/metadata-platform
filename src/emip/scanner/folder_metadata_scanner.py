@@ -39,6 +39,14 @@ class _StatementSource:
     def stem(self) -> str:
         return self.source_path.stem
 
+    @property
+    def name(self) -> str:
+        return self.source_path.name
+
+    @property
+    def parent(self) -> Path:
+        return self.source_path.parent
+
     def read_text(self, encoding: str = "utf-8") -> str:
         """Return the split statement using the parser's file API."""
 
