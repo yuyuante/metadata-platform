@@ -19,6 +19,14 @@ from .domain import (
     Tag,
 )
 from .metadata_object import MetadataObject, Object, ObjectStatus, ObjectType
+from .parameter import (
+    ParameterContext,
+    ParameterDefinition,
+    ParameterResolution,
+    ParameterResolutionStatus,
+    ParameterScopeType,
+    ParameterSourceType,
+)
 from .source_location import SourceLocation, SourceType
 
 __all__ = [
@@ -32,6 +40,12 @@ __all__ = [
     "ObjectTag",
     "ObjectType",
     "ObjectVersion",
+    "ParameterContext",
+    "ParameterDefinition",
+    "ParameterResolution",
+    "ParameterResolutionStatus",
+    "ParameterScopeType",
+    "ParameterSourceType",
     "PIIResult",
     "PIIRule",
     "Relation",

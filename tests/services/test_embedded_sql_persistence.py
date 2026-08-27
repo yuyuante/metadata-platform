@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from pathlib import Path
 from typing import cast
@@ -146,3 +147,76 @@ def test_embedded_sql_lineage_survives_persistence_reload_and_query(
         str(target_table.object_id)
         in reloaded.flow(target_definition.qualified_name, depth=1)["downstream"]
     )
+
+
+def test_parameter_resolved_lineage_survives_persistence_reload_and_query(
+    tmp_path: Path,
+) -> None:
+    parameter_file = tmp_path / "infa_aprun" / "APP" / "parameters.txt"
+    parameter_file.parent.mkdir(parents=True)
+    parameter_file.write_text(
+        "[Global]\n$$Environment=Production\n"
+        "[F.WF:W.ST:S]\n$$SCHEMA=dbo\n$$TABLE=SourceTable\n"
+        "$$CONNECTION=ODBC_SQL_SVEL\n",
+        encoding="utf-8",
+    )
+    xml_path = tmp_path / "xml" / "APP" / "workflow.xml"
+    xml_path.parent.mkdir(parents=True)
+    xml_path.write_text(
+        """<POWERMART><REPOSITORY><FOLDER NAME="F">
+<WORKFLOW NAME="W">
+<ATTRIBUTE NAME="Parameter Filename" VALUE="/infa_aprun/APP/parameters.txt" />
+<SESSION NAME="S" MAPPINGNAME="M">
+<SESSTRANSFORMATIONINST TRANSFORMATIONTYPE="SOURCE QUALIFIER" SINSTANCENAME="SQ">
+<ATTRIBUTE NAME="Sql Query" VALUE="SELECT * FROM $$SCHEMA.$$TABLE" />
+</SESSTRANSFORMATIONINST><SESSIONEXTENSION SINSTANCENAME="SQ">
+<CONNECTIONREFERENCE CONNECTIONNAME="$$CONNECTION" />
+</SESSIONEXTENSION></SESSION></WORKFLOW>
+</FOLDER></REPOSITORY></POWERMART>""",
+        encoding="utf-8",
+    )
+
+    parsed = InformaticaMetadataParser().parse(xml_path)
+    source_qualifier = next(item for item in parsed if item.name == "SQ")
+    source_table = MetadataObject.create(
+        ObjectType.TABLE, "SVEL", "dbo.SourceTable", "SourceTable"
+    )
+    wrong_provider = MetadataObject.create(
+        ObjectType.TABLE, "SVELAH", "dbo.SourceTable", "SourceTable"
+    )
+    integrated = MetadataIntegrationService().integrate(
+        [source_table, wrong_provider, source_qualifier]
+    )
+
+    repository = RoundTripRepository()
+    result = MetadataObjectPersister(cast(MetadataRepository, repository)).persist(
+        integrated.objects
+    )
+
+    assert result.objects_created == 3
+    assert len(repository.relations) == 1
+    reloaded = QueryEngine(cast(QueryRepository, repository))
+    assert [
+        item["qualified_name"]
+        for item in reloaded.depends(source_qualifier.qualified_name)
+    ] == [source_table.qualified_name]
+    assert reloaded.used_by(str(wrong_provider.object_id)) == []
+
+    stored_source = next(
+        item for item in repository.find_objects() if item.name == "SQ"
+    )
+    properties = [
+        (item.property_name, item.property_value) for item in stored_source.properties
+    ]
+    property_map = dict(properties)
+    assert property_map["embedded_sql.1.raw_sql"] == ("SELECT * FROM $$SCHEMA.$$TABLE")
+    assert property_map["embedded_sql.1.resolved_sql"] == (
+        "SELECT * FROM dbo.SourceTable"
+    )
+    evidence = [
+        json.loads(value or "{}")
+        for name, value in properties
+        if name == "embedded_sql.1.parameter_resolution"
+    ]
+    assert {item["status"] for item in evidence} == {"EXACT"}
+    assert {item["environment"] for item in evidence} == {"Production"}

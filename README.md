@@ -160,10 +160,22 @@ are therefore the durable evidence record.
 
 Physical identity resolution uses the strongest available qualified name and
 creates a link only for one unique match. Ambiguous names remain unresolved.
-Runtime-dependent object names such as `$$TABLE_NAME` are recorded as
-unresolved and never turned into exact lineage. Parameter-file ingestion,
-environment-specific resolution, arbitrary SQL-property discovery, and column
-lineage remain outside this capability.
+For an exact literal PowerCenter parameter, EMIP reads the session's explicitly
+referenced parameter file, or the workflow's unique reference inherited by that
+session. It supports observed `[Global]`, workflow, and session sections, applies
+session > workflow > global precedence, and substitutes `$$tokens` only outside
+SQL strings and comments. Raw SQL, resolved SQL, status, source/scope, and
+environment evidence remain on the originating object. A resolved connection
+parameter scopes identity matching to the corresponding source, target, or
+lookup role; it never enables a cross-provider short-name fallback.
+
+Blank, conflicting, missing, expression-valued, nested, `$PM*`, or otherwise
+runtime-dependent values remain explicitly unresolved. EMIP does not evaluate
+PowerCenter expressions, infer deployment-root aliases, merge multiple
+parameter files, or claim full PowerCenter runtime precedence. Arbitrary
+SQL-property discovery and column lineage remain outside this capability.
+Mapping-definition SQL that is not attached to one unambiguous session is also
+left unresolved because it has no authoritative parameter-file context.
 
 For example, if a Source Qualifier contains:
 
@@ -324,11 +336,10 @@ Future relation/evidence models should preserve the original source, resolution 
 
 The highest-value parser improvements are currently:
 
-1. Add Informatica parameter-file and environment-aware resolution where inputs are available.
-2. Extend Dynamic SQL output with confidence/evidence/unresolved-reason metadata.
-3. Add Python embedded-SQL parsing using language AST rather than regex.
-4. Add Java, C#, C/C++, Shell, and other source-language parsers incrementally.
-5. Build column-level lineage only after object-level cross-provider semantics remain stable.
+1. Extend Dynamic SQL output with confidence/evidence/unresolved-reason metadata.
+2. Add Python embedded-SQL parsing using language AST rather than regex.
+3. Add Java, C#, C/C++, Shell, and other source-language parsers incrementally.
+4. Build column-level lineage only after object-level cross-provider semantics remain stable.
 
 ## Project Overview / 專案概覽
 
@@ -475,8 +486,9 @@ The platform is already useful for **object-level technical metadata and develop
 ## Current Limitations / 目前限制
 
 - Informatica SQL-property lineage is object-level and limited to the four
-  evidenced property names documented above; parameterized object names remain
-  unresolved without environment inputs.
+  evidenced property names documented above. Only exact session-context
+  parameter-file values are resolved; runtime-dependent and context-free
+  mapping-definition parameters remain unresolved.
 - Java, Python, C#, C/C++, Shell, Perl, and other embedded-SQL source-language parsers are not implemented.
 - Dynamic SQL is limited to deterministic static folding; runtime-dependent cases remain unresolved.
 - Complete column-level lineage and impact analysis are not implemented.
@@ -488,7 +500,8 @@ The platform is already useful for **object-level technical metadata and develop
 ## Roadmap / 發展路線圖
 
 - Complete Milestone-010 Static Developer Web v1.
-- Informatica parameter/environment resolution.
+- Broader Informatica runtime-expression and worklet parameter semantics when
+  production evidence establishes safe precedence.
 - Confidence/evidence-aware dynamic SQL lineage.
 - Source-language AST parsers for Python, Java, C#, C/C++, Shell, and others.
 - Column-level lineage and richer impact analysis.

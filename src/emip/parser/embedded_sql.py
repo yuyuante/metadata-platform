@@ -12,7 +12,12 @@ from typing import cast
 from sqlglot import exp, parse
 from sqlglot.errors import ErrorLevel, ParseError
 
-from emip.domain import ObjectType, RelationCandidate, RelationType
+from emip.domain import (
+    ObjectType,
+    ParameterResolution,
+    RelationCandidate,
+    RelationType,
+)
 from emip.parser.script_splitter import ScriptSplitter
 
 
@@ -48,6 +53,8 @@ class EmbeddedSqlFragment:
     raw_sql: str
     role: EmbeddedSqlRole
     connection_name: str | None
+    resolved_sql: str | None = None
+    parameter_resolutions: tuple[ParameterResolution, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +133,7 @@ class EmbeddedSqlAnalyzer:
         relations: list[RelationCandidate] = []
         unresolved: list[str] = []
         errors: list[str] = []
-        statements = self._splitter.split(fragment.raw_sql)
+        statements = self._splitter.split(fragment.resolved_sql or fragment.raw_sql)
         parsed_count = 0
         for statement_index, statement in enumerate(statements, 1):
             try:
@@ -200,10 +207,35 @@ class EmbeddedSqlAnalyzer:
                     "connection": fragment.connection_name,
                     "property": fragment.property_name,
                     "raw_sql": fragment.raw_sql,
+                    "resolved_sql": fragment.resolved_sql,
                     "role": fragment.role.value,
                     "source_file": fragment.source_file,
                     "source_root": fragment.source_root,
                     "xml_context": fragment.xml_context,
+                    "parameter_resolutions": [
+                        {
+                            "token": resolution.token,
+                            "value": resolution.value,
+                            "status": resolution.status.value,
+                            "source_type": (
+                                resolution.source_type.value
+                                if resolution.source_type is not None
+                                else None
+                            ),
+                            "source_file": resolution.source_file,
+                            "source_root": resolution.source_root,
+                            "scope": (
+                                resolution.scope_type.value
+                                if resolution.scope_type is not None
+                                else None
+                            ),
+                            "scope_identity": resolution.scope_identity,
+                            "environment": resolution.environment,
+                            "precedence": resolution.precedence,
+                            "evidence": resolution.evidence,
+                        }
+                        for resolution in fragment.parameter_resolutions
+                    ],
                 },
                 ensure_ascii=False,
                 sort_keys=True,

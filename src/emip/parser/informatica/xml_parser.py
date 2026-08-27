@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -13,6 +15,10 @@ from emip.domain import (
     MetadataObject,
     ObjectProperty,
     ObjectType,
+    ParameterContext,
+    ParameterDefinition,
+    ParameterResolution,
+    ParameterResolutionStatus,
     RelationCandidate,
     RelationType,
 )
@@ -20,6 +26,11 @@ from emip.parser.embedded_sql import (
     EmbeddedSqlAnalysis,
     EmbeddedSqlAnalyzer,
     InformaticaEmbeddedSqlExtractor,
+)
+from emip.parser.informatica.parameters import (
+    InformaticaParameterResolver,
+    ParameterDiagnostic,
+    ParameterFileCache,
 )
 
 
@@ -33,6 +44,7 @@ class InformaticaMetadataParser:
         self._profiler = profiler
         self._embedded_sql_extractor = InformaticaEmbeddedSqlExtractor()
         self._embedded_sql_analyzer = EmbeddedSqlAnalyzer()
+        self._parameter_files = ParameterFileCache()
         self._source_path = Path(".")
 
     def parse(self, path: Path) -> list[MetadataObject]:
@@ -187,6 +199,7 @@ class InformaticaMetadataParser:
     ) -> list[MetadataObject]:
         name = _attr(workflow, "NAME", "UNKNOWN_WORKFLOW")
         workflow_qn = self._qn(folder_qn, name)
+        parameter_references = _parameter_file_references(workflow)
         result = [self._object(ObjectType.WORKFLOW, workflow_qn, workflow, "NAME")]
         for child in list(workflow):
             tag = _name(child)
@@ -212,6 +225,7 @@ class InformaticaMetadataParser:
                         child,
                         mappings,
                         mapping_aliases,
+                        parameter_references,
                     )
                 )
             elif tag == "WORKFLOWVARIABLE":
@@ -232,6 +246,7 @@ class InformaticaMetadataParser:
                 sessions,
                 mapping_aliases,
                 task_definitions,
+                parameter_references,
             )
             for item in instance_objects:
                 if item.qualified_name not in by_qn:
@@ -263,6 +278,7 @@ class InformaticaMetadataParser:
         sessions: dict[str, ET.Element],
         mapping_aliases: dict[str, str],
         task_definitions: dict[str, ET.Element],
+        workflow_parameter_references: tuple[str, ...],
     ) -> list[MetadataObject]:
         """Materialize workflow nodes represented only by TASKINSTANCE elements."""
         name = _attr(
@@ -327,7 +343,15 @@ class InformaticaMetadataParser:
             # references live on the reusable SESSION definition, so
             # materialize those children under the workflow task as well.
             if session_definition is not None:
-                result.extend(self._session_children(task_qn, session_definition, item))
+                result.extend(
+                    self._session_children(
+                        task_qn,
+                        session_definition,
+                        item,
+                        mapping_name,
+                        workflow_parameter_references,
+                    )
+                )
         if object_type == ObjectType.COMMAND and definition is not None:
             for command in _children(definition, "VALUEPAIR"):
                 child = self._child(task_qn, command, ObjectType.FILE, "NAME")
@@ -346,6 +370,7 @@ class InformaticaMetadataParser:
         task: ET.Element,
         mappings: dict[str, ET.Element],
         mapping_aliases: dict[str, str] | None = None,
+        workflow_parameter_references: tuple[str, ...] = (),
     ) -> list[MetadataObject]:
         name = _attr(task, "NAME", "UNKNOWN_TASK")
         raw_type = (
@@ -384,7 +409,15 @@ class InformaticaMetadataParser:
                         task,
                     ),
                 )
-            result.extend(self._session_children(task_qn, task, item))
+            result.extend(
+                self._session_children(
+                    task_qn,
+                    task,
+                    item,
+                    mapping_name,
+                    workflow_parameter_references,
+                )
+            )
         elif object_type == ObjectType.COMMAND:
             for command in _children(task, "VALUEPAIR"):
                 child = self._child(task_qn, command, ObjectType.FILE, "NAME")
@@ -401,8 +434,17 @@ class InformaticaMetadataParser:
         session_qn: str,
         session: ET.Element,
         session_item: MetadataObject,
+        mapping_name: str,
+        workflow_parameter_references: tuple[str, ...] = (),
     ) -> list[MetadataObject]:
         result: list[MetadataObject] = []
+        parameter_resolver = self._session_parameter_resolver(
+            session_qn,
+            mapping_name,
+            session,
+            session_item,
+            workflow_parameter_references,
+        )
         types = {
             "SOURCE DEFINITION": ObjectType.SOURCE_DEFINITION,
             "TARGET DEFINITION": ObjectType.TARGET_DEFINITION,
@@ -423,7 +465,11 @@ class InformaticaMetadataParser:
             )
             instance_name = _attr(extension, "SINSTANCENAME", "")
             if connection and instance_name:
-                connection_by_instance[instance_name] = connection
+                resolved_connection, _ = _resolve_connection(
+                    connection, parameter_resolver
+                )
+                if resolved_connection:
+                    connection_by_instance[instance_name] = resolved_connection
 
         for transformation in _children(session, "SESSTRANSFORMATIONINST"):
             kind = types.get(_attr(transformation, "TRANSFORMATIONTYPE", "").upper())
@@ -435,6 +481,7 @@ class InformaticaMetadataParser:
                     "SINSTANCENAME",
                     analyze_embedded_sql=False,
                 )
+                raw_connection = _raw_connection(transformation, extensions)
                 connection = connection_by_instance.get(
                     _attr(transformation, "SINSTANCENAME", "")
                 )
@@ -449,7 +496,18 @@ class InformaticaMetadataParser:
                             property_value=connection,
                         ),
                     )
-                self._attach_embedded_sql(child, transformation, connection or None)
+                connection_resolution: ParameterResolution | None = None
+                if raw_connection:
+                    _, connection_resolution = _resolve_connection(
+                        raw_connection, parameter_resolver
+                    )
+                self._attach_embedded_sql(
+                    child,
+                    transformation,
+                    connection or None,
+                    parameter_resolver,
+                    connection_resolution,
+                )
                 if kind is ObjectType.TARGET_DEFINITION:
                     writer_properties: list[ObjectProperty] = []
                     for extension in extensions:
@@ -503,6 +561,69 @@ class InformaticaMetadataParser:
                 ),
             )
         return result
+
+    def _session_parameter_resolver(
+        self,
+        session_qn: str,
+        mapping_name: str,
+        session: ET.Element,
+        session_item: MetadataObject,
+        workflow_parameter_references: tuple[str, ...] = (),
+    ) -> InformaticaParameterResolver:
+        """Create a resolver from only the session's explicit file reference."""
+
+        parts = session_qn.split("::")
+        context = ParameterContext(
+            folder=parts[-3] if len(parts) >= 3 else "",
+            workflow=parts[-2] if len(parts) >= 2 else "",
+            session=parts[-1],
+            mapping=mapping_name or None,
+        )
+        session_references = _parameter_file_references(session)
+        references = session_references or workflow_parameter_references
+        diagnostics: list[ParameterDiagnostic] = []
+        definitions: tuple[ParameterDefinition, ...] = ()
+        unresolved_status = ParameterResolutionStatus.UNRESOLVED
+        if len(references) == 1:
+            parsed, diagnostic = self._parameter_files.load_reference(
+                references[0], self._source_path
+            )
+            if parsed is not None:
+                definitions = parsed.definitions
+                diagnostics.extend(parsed.diagnostics)
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+            session_item.properties += (
+                ObjectProperty(
+                    property_name="parameter_file.reference",
+                    property_value=references[0],
+                ),
+            )
+        elif len(references) > 1:
+            unresolved_status = ParameterResolutionStatus.AMBIGUOUS
+            diagnostics.append(
+                ParameterDiagnostic(
+                    str(self._source_path),
+                    None,
+                    "multiple parameter file references are ambiguous",
+                )
+            )
+        session_item.properties += tuple(
+            ObjectProperty(
+                property_name="parameter.diagnostic",
+                property_value=(
+                    f"{diagnostic.source_file}:"
+                    f"{diagnostic.line_number or '-'}: {diagnostic.message}"
+                ),
+            )
+            for diagnostic in diagnostics
+        )
+        return InformaticaParameterResolver(
+            context,
+            definitions,
+            tuple(diagnostics),
+            unresolved_status,
+        )
 
     def _mapping(self, folder_qn: str, mapping: ET.Element) -> list[MetadataObject]:
         item = self._object(
@@ -612,6 +733,8 @@ class InformaticaMetadataParser:
         item: MetadataObject,
         element: ET.Element,
         connection_name: str | None = None,
+        parameter_resolver: InformaticaParameterResolver | None = None,
+        connection_resolution: ParameterResolution | None = None,
     ) -> None:
         """Retain SQL evidence and attach safe relation candidates in one pass."""
 
@@ -623,6 +746,23 @@ class InformaticaMetadataParser:
             connection_name,
         )
         for index, fragment in enumerate(fragments, 1):
+            resolutions: tuple[ParameterResolution, ...] = ()
+            if parameter_resolver is not None:
+                substitution = parameter_resolver.substitute_sql(fragment.raw_sql)
+                resolutions = tuple(dict.fromkeys(substitution.resolutions))
+                if connection_resolution is not None:
+                    resolutions = tuple(
+                        dict.fromkeys(resolutions + (connection_resolution,))
+                    )
+                fragment = replace(
+                    fragment,
+                    resolved_sql=(
+                        substitution.resolved_sql
+                        if substitution.resolved_sql != fragment.raw_sql
+                        else None
+                    ),
+                    parameter_resolutions=resolutions,
+                )
             analysis = self._embedded_sql_analyzer.analyze(fragment)
             item.properties += _embedded_sql_properties(index, analysis)
             item.relation_candidates = tuple(
@@ -652,6 +792,20 @@ def _read_xml(path: Path) -> str:
     return data.decode(encoding)
 
 
+def _parameter_file_references(element: ET.Element) -> tuple[str, ...]:
+    """Return distinct literal parameter-file references on one XML scope."""
+
+    return tuple(
+        dict.fromkeys(
+            _attr(attribute, "VALUE", "").strip()
+            for attribute in _children(element, "ATTRIBUTE")
+            if " ".join(_attr(attribute, "NAME", "").casefold().split())
+            == "parameter filename"
+            and _attr(attribute, "VALUE", "").strip()
+        )
+    )
+
+
 def _name(element: ET.Element) -> str:
     return element.tag.rsplit("}", 1)[-1].upper()
 
@@ -678,6 +832,56 @@ def _source_connection(
         source_qualifier = _attr(extension, "DSQINSTNAME", "")
         return connection_by_instance.get(source_qualifier, "")
     return ""
+
+
+def _raw_connection(transformation: ET.Element, extensions: list[ET.Element]) -> str:
+    """Return the role-specific connection reference before parameter resolution."""
+
+    instance_name = _attr(transformation, "SINSTANCENAME", "")
+    extension_by_instance = {
+        _attr(extension, "SINSTANCENAME", ""): extension for extension in extensions
+    }
+    extension = extension_by_instance.get(instance_name)
+    if extension is None:
+        return ""
+    connection = next(
+        (
+            prop.property_value or ""
+            for prop in _properties(extension)
+            if prop.property_name == "connectionreference.connectionname"
+        ),
+        "",
+    )
+    if connection:
+        return connection
+    source_qualifier = _attr(extension, "DSQINSTNAME", "")
+    qualifier_extension = extension_by_instance.get(source_qualifier)
+    if qualifier_extension is None:
+        return ""
+    return next(
+        (
+            prop.property_value or ""
+            for prop in _properties(qualifier_extension)
+            if prop.property_name == "connectionreference.connectionname"
+        ),
+        "",
+    )
+
+
+def _resolve_connection(
+    connection: str, resolver: InformaticaParameterResolver
+) -> tuple[str | None, ParameterResolution | None]:
+    """Resolve a connection token exactly or withhold provider context."""
+
+    if not connection.startswith("$$"):
+        return connection, None
+    resolution = resolver.resolve(connection)
+    if (
+        resolution.status is ParameterResolutionStatus.EXACT
+        and resolution.value is not None
+    ):
+        return resolution.value, resolution
+    return None, resolution
 
 
 def _properties(element: ET.Element) -> tuple[ObjectProperty, ...]:
@@ -732,6 +936,44 @@ def _embedded_sql_properties(
             property_name=f"{prefix}.xml_context", property_value=fragment.xml_context
         ),
     ]
+    if fragment.resolved_sql is not None:
+        values.append(
+            ObjectProperty(
+                property_name=f"{prefix}.resolved_sql",
+                property_value=fragment.resolved_sql,
+            )
+        )
+    values.extend(
+        ObjectProperty(
+            property_name=f"{prefix}.parameter_resolution",
+            property_value=json.dumps(
+                {
+                    "token": resolution.token,
+                    "value": resolution.value,
+                    "status": resolution.status.value,
+                    "source_type": (
+                        resolution.source_type.value
+                        if resolution.source_type is not None
+                        else None
+                    ),
+                    "source_file": resolution.source_file,
+                    "source_root": resolution.source_root,
+                    "scope": (
+                        resolution.scope_type.value
+                        if resolution.scope_type is not None
+                        else None
+                    ),
+                    "scope_identity": resolution.scope_identity,
+                    "environment": resolution.environment,
+                    "precedence": resolution.precedence,
+                    "evidence": resolution.evidence,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        for resolution in fragment.parameter_resolutions
+    )
     if fragment.connection_name:
         values.append(
             ObjectProperty(
