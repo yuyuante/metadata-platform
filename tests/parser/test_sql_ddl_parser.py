@@ -95,6 +95,19 @@ def test_parse_create_materialized_view_as_select(tmp_path: Path) -> None:
     assert "FROM DB_OWNER.customer" in (objects[0].description or "")
 
 
+def test_parse_materialized_view_after_drop_statement(tmp_path: Path) -> None:
+    sql = (
+        "DROP MATERIALIZED VIEW IF EXISTS reporting.daily_customers;\n"
+        "CREATE MATERIALIZED VIEW reporting.daily_customers AS SELECT 1;"
+    )
+
+    objects = _parse(tmp_path, sql)
+
+    assert len(objects) == 1
+    assert objects[0].object_type is ObjectType.MATERIALIZED_VIEW
+    assert objects[0].description == sql
+
+
 def test_parse_create_view(tmp_path: Path) -> None:
     sql = "CREATE VIEW reporting.customers AS SELECT 1;"
     objects = _parse(tmp_path, sql)

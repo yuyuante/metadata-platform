@@ -5,16 +5,26 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from time import perf_counter_ns
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import psycopg2  # type: ignore[import-untyped]
 from psycopg2 import sql
 from psycopg2.extras import execute_values  # type: ignore[import-untyped]
 
 from emip.database import DatabaseConnection, DatabaseNaming
-from emip.database.tables import COLUMN, OBJECT, PROPERTY, RELATION, SOURCE_LOCATION
+from emip.database.tables import (
+    COLUMN,
+    COLUMN_LINEAGE,
+    OBJECT,
+    PROPERTY,
+    RELATION,
+    SOURCE_LOCATION,
+)
 from emip.domain import (
     Column,
+    ColumnLineage,
+    ColumnLineageCandidate,
+    ColumnLineageClassification,
     MetadataObject,
     ObjectProperty,
     ObjectStatus,
@@ -76,6 +86,7 @@ _SOURCE_LOCATION_COLUMNS = (
 _SOURCE_LOCATION_RETURNING_COLUMNS = sql.SQL(", ").join(
     sql.Identifier(column_name.lower()) for column_name in _SOURCE_LOCATION_COLUMNS
 )
+_COLUMN_LINEAGE_NAMESPACE = UUID("c9054085-26d7-47e0-94d9-4d295932d55b")
 
 
 def _to_database_timestamp(value: datetime) -> datetime:
@@ -156,6 +167,25 @@ def _row_to_relation(row: tuple[Any, ...]) -> Relation:
     )
 
 
+def _row_to_column_lineage(row: tuple[Any, ...]) -> ColumnLineage:
+    return ColumnLineage(
+        lineage_id=UUID(str(row[0])),
+        target_object_id=UUID(str(row[1])),
+        target_column_name=row[2],
+        source_object_id=UUID(str(row[3])) if row[3] is not None else None,
+        source_column_name=row[4],
+        classification=ColumnLineageClassification(row[5]),
+        expression=row[6],
+        statement_sql=row[7],
+        source_type=row[8],
+        source_root=row[9],
+        source_file=row[10],
+        source_object=row[11],
+        evidence=row[12],
+        unresolved_reason=row[13],
+    )
+
+
 class MetadataRepository:
     """Persist MetadataObject instances in Greenplum."""
 
@@ -184,6 +214,12 @@ class MetadataRepository:
         )
         self._column_table_identifier = sql.Identifier(
             *(part.lower() for part in qualified_column_table.split("."))
+        )
+        qualified_column_lineage_table = DatabaseNaming(
+            settings.schema, settings.table_prefix
+        ).table(COLUMN_LINEAGE)
+        self._column_lineage_table_identifier = sql.Identifier(
+            *(part.lower() for part in qualified_column_lineage_table.split("."))
         )
         qualified_property_table = DatabaseNaming(
             settings.schema, settings.table_prefix
@@ -828,7 +864,11 @@ class MetadataRepository:
                 ),
             )
             rows = cursor.fetchall()
-        return [_row_to_metadata_object(row) for row in rows]
+        objects = [_row_to_metadata_object(row) for row in rows]
+        columns = self._load_columns_for_objects([item.object_id for item in objects])
+        for item in objects:
+            item.columns = columns[item.object_id]
+        return objects
 
     def find_objects(self) -> list[MetadataObject]:
         """Return all persisted objects for repository-only queries."""
@@ -846,8 +886,12 @@ class MetadataRepository:
         source_locations = self._load_source_locations_for_objects(
             [metadata_object.object_id for metadata_object in objects]
         )
+        columns = self._load_columns_for_objects(
+            [metadata_object.object_id for metadata_object in objects]
+        )
         for metadata_object in objects:
             metadata_object.properties = properties[metadata_object.object_id]
+            metadata_object.columns = columns[metadata_object.object_id]
             metadata_object.source_locations = source_locations[
                 metadata_object.object_id
             ]
@@ -868,6 +912,131 @@ class MetadataRepository:
             self._connection.rollback()
             return []
         return [_row_to_relation(row) for row in rows]
+
+    def find_column_lineage(self) -> list[ColumnLineage]:
+        """Load all column lineage once for queries and static export."""
+
+        query = sql.SQL(
+            "SELECT lineage_id, target_object_id, target_column_name, "
+            "source_object_id, source_column_name, classification, expression, "
+            "statement_sql, source_type, source_root, source_file, source_object, "
+            "evidence, unresolved_reason FROM {} "
+            "ORDER BY target_object_id, target_column_name, lineage_id"
+        ).format(self._column_lineage_table_identifier)
+        try:
+            with self._connection.cursor() as cursor:
+                self._execute(cursor, query)
+                rows = cursor.fetchall()
+        except psycopg2.errors.UndefinedTable:
+            self._connection.rollback()
+            return []
+        return [_row_to_column_lineage(row) for row in rows]
+
+    def create_column_lineage(
+        self,
+        candidates: list[tuple[MetadataObject, ColumnLineageCandidate]],
+    ) -> int:
+        """Resolve candidate owners and persist stable, idempotent lineage rows."""
+
+        objects = self.find_objects()
+        by_identity: defaultdict[tuple[str, ...], dict[UUID, MetadataObject]] = (
+            defaultdict(dict)
+        )
+        for item in objects:
+            normalized = normalize_identifier(item.qualified_name)
+            for width in range(1, len(normalized) + 1):
+                by_identity[normalized[-width:]][item.object_id] = item
+
+        def resolve(
+            qualified_name: str | None, system_name: str | None = None
+        ) -> MetadataObject | None:
+            if not qualified_name:
+                return None
+            normalized = normalize_identifier(qualified_name)
+            matches: dict[UUID, MetadataObject] = {}
+            for width in range(len(normalized), 0, -1):
+                matches = dict(by_identity.get(normalized[-width:], {}))
+                if system_name:
+                    matches = {
+                        key: value
+                        for key, value in matches.items()
+                        if value.system_name.casefold() == system_name.casefold()
+                    }
+                if matches:
+                    break
+            return next(iter(matches.values())) if len(matches) == 1 else None
+
+        rows: list[tuple[object, ...]] = []
+        for _, candidate in candidates:
+            target = resolve(
+                candidate.target_qualified_name, candidate.target_system_name
+            )
+            if target is None:
+                continue
+            source = resolve(
+                candidate.source_qualified_name, candidate.source_system_name
+            )
+            if (
+                candidate.classification is not ColumnLineageClassification.UNRESOLVED
+                and candidate.source_qualified_name is not None
+                and source is None
+            ):
+                continue
+            stable_key = "\x1f".join(
+                (
+                    str(source.object_id) if source else "",
+                    candidate.source_column_name or "",
+                    str(target.object_id),
+                    candidate.target_column_name,
+                    candidate.classification.value,
+                    candidate.expression,
+                    candidate.statement_sql,
+                    candidate.source_type,
+                    candidate.source_object,
+                    candidate.source_root or "",
+                    candidate.source_file or "",
+                    candidate.evidence,
+                    candidate.unresolved_reason or "",
+                )
+            )
+            rows.append(
+                (
+                    str(uuid5(_COLUMN_LINEAGE_NAMESPACE, stable_key)),
+                    str(target.object_id),
+                    candidate.target_column_name,
+                    str(source.object_id) if source else None,
+                    candidate.source_column_name,
+                    candidate.classification.value,
+                    candidate.expression,
+                    candidate.statement_sql,
+                    candidate.source_type,
+                    candidate.source_root,
+                    candidate.source_file,
+                    candidate.source_object,
+                    candidate.evidence,
+                    candidate.unresolved_reason,
+                )
+            )
+        if not rows:
+            return 0
+        query = sql.SQL(
+            "INSERT INTO {} (lineage_id, target_object_id, target_column_name, "
+            "source_object_id, source_column_name, classification, expression, "
+            "statement_sql, source_type, source_root, source_file, source_object, "
+            "evidence, unresolved_reason) VALUES %s ON CONFLICT DO NOTHING"
+        ).format(self._column_lineage_table_identifier)
+        try:
+            with self._connection.cursor() as cursor:
+                self._execute_values(cursor, query, rows)
+                count = int(max(cursor.rowcount, 0))
+            self._connection.commit()
+        except psycopg2.errors.UndefinedTable:
+            self._connection.rollback()
+            return 0
+        except psycopg2.Error:
+            self._connection.rollback()
+            raise
+        return count
 
     def create_relation(self, relation: Relation) -> Relation:
         """Insert one resolved relation; duplicate graph edges are harmless."""

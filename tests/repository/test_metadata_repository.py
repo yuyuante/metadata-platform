@@ -7,6 +7,8 @@ from psycopg2 import sql
 
 from emip.domain import (
     Column,
+    ColumnLineageCandidate,
+    ColumnLineageClassification,
     MetadataObject,
     ObjectStatus,
     ObjectType,
@@ -290,3 +292,86 @@ def test_create_relations_honors_resolved_target_provider() -> None:
 
     assert resolved == 1
     assert repository._connection.commits == 1
+
+
+def test_create_column_lineage_uses_stable_key_and_one_object_load() -> None:
+    class Cursor:
+        rowcount = 1
+
+        def __enter__(self) -> "Cursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    class Connection:
+        commits = 0
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            raise AssertionError("rollback was not expected")
+
+    source = MetadataObject.create(
+        ObjectType.TABLE, "warehouse", "dbo.source_table", "source_table"
+    )
+    target = MetadataObject.create(
+        ObjectType.TABLE, "warehouse", "dbo.target_table", "target_table"
+    )
+    owner = MetadataObject.create(
+        ObjectType.PROCEDURE, "warehouse", "dbo.load_target", "load_target"
+    )
+    candidate = ColumnLineageCandidate(
+        target_qualified_name=target.qualified_name,
+        target_column_name="id",
+        classification=ColumnLineageClassification.EXACT_DIRECT,
+        expression="s.source_id",
+        statement_sql=(
+            "INSERT INTO dbo.target_table (id) "
+            "SELECT s.source_id FROM dbo.source_table s"
+        ),
+        source_type="STATIC_SQL",
+        source_root="D:/sql",
+        source_file="load_target.sql",
+        source_object=owner.qualified_name,
+        evidence='{"query": "SELECT s.source_id FROM dbo.source_table AS s"}',
+        source_qualified_name=source.qualified_name,
+        source_column_name="source_id",
+        source_system_name="warehouse",
+        target_system_name="warehouse",
+    )
+    object_loads = 0
+    inserted: list[list[tuple[object, ...]]] = []
+
+    def find_objects() -> list[MetadataObject]:
+        nonlocal object_loads
+        object_loads += 1
+        return [source, target, owner]
+
+    def capture_rows(
+        cursor: object, query: object, rows: list[tuple[object, ...]]
+    ) -> None:
+        del cursor, query
+        inserted.append(rows)
+
+    repository = MetadataRepository.__new__(MetadataRepository)
+    repository._connection = Connection()
+    repository._column_lineage_table_identifier = sql.Identifier("emip_column_lineage")
+    repository.find_objects = find_objects  # type: ignore[method-assign]
+    repository._execute_values = capture_rows  # type: ignore[method-assign]
+
+    assert repository.create_column_lineage([(owner, candidate)]) == 1
+    assert repository.create_column_lineage([(owner, candidate)]) == 1
+
+    assert object_loads == 2
+    assert inserted[0][0][0] == inserted[1][0][0]
+    assert inserted[0][0][1:5] == (
+        str(target.object_id),
+        "id",
+        str(source.object_id),
+        "source_id",
+    )

@@ -392,6 +392,26 @@ class MetadataObjectPersister:
             for obj, object_candidates in resolved_sources
             for candidate in object_candidates
         ]
+        lineage_by_identity = {
+            (
+                item.system_name.casefold(),
+                item.object_type,
+                item.qualified_name.casefold(),
+            ): item.column_lineage_candidates
+            for item in object_list
+        }
+        column_lineage_candidates = [
+            (obj, candidate)
+            for obj, _ in resolved_sources
+            for candidate in lineage_by_identity.get(
+                (
+                    obj.system_name.casefold(),
+                    obj.object_type,
+                    obj.qualified_name.casefold(),
+                ),
+                (),
+            )
+        ]
         if self._profiler is not None:
             elapsed = perf_counter() - metadata_started_at
             self._profiler.record(
@@ -412,6 +432,13 @@ class MetadataObjectPersister:
                 self._profiler.repository.relation_persistence_seconds += elapsed
                 self._profiler.count("Relation", relation_count)
             self._report_progress("Saving relations: completed")
+        create_column_lineage = getattr(self._repository, "create_column_lineage", None)
+        if column_lineage_candidates and create_column_lineage is not None:
+            self._report_progress(
+                f"Saving column lineage: {len(column_lineage_candidates)} candidates"
+            )
+            create_column_lineage(column_lineage_candidates)
+            self._report_progress("Saving column lineage: completed")
         if self._profiler is not None:
             self._profiler.record(
                 "Repository persistence",

@@ -125,6 +125,55 @@ class ColumnRelation:
     transformation: str | None = None
 
 
+class ColumnLineageClassification(StrEnum):
+    """Confidence classification for one column-lineage dependency."""
+
+    EXACT_DIRECT = "EXACT_DIRECT"
+    EXACT_EXPRESSION = "EXACT_EXPRESSION"
+    UNRESOLVED = "UNRESOLVED"
+
+
+@dataclass(frozen=True, slots=True)
+class ColumnLineageCandidate:
+    """AST-derived column lineage awaiting durable object resolution."""
+
+    target_qualified_name: str
+    target_column_name: str
+    classification: ColumnLineageClassification
+    expression: str
+    statement_sql: str
+    source_type: str
+    source_root: str | None
+    source_file: str | None
+    source_object: str
+    evidence: str
+    source_qualified_name: str | None = None
+    source_column_name: str | None = None
+    source_system_name: str | None = None
+    target_system_name: str | None = None
+    unresolved_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ColumnLineage:
+    """Durable, evidence-rich column dependency loaded from the repository."""
+
+    lineage_id: UUID
+    target_object_id: UUID
+    target_column_name: str
+    classification: ColumnLineageClassification
+    expression: str
+    statement_sql: str
+    source_type: str
+    source_root: str | None
+    source_file: str | None
+    source_object: str
+    evidence: str
+    source_object_id: UUID | None = None
+    source_column_name: str | None = None
+    unresolved_reason: str | None = None
+
+
 @dataclass(slots=True)
 class ScanJob:
     """One execution of a scanner."""

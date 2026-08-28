@@ -63,3 +63,18 @@ All EMIP tables must begin with `EMIP_`. Constraint names use the `EMIP_PK_` or 
 | `IS_UNIQUE` | `BOOLEAN` | No | Unique-constraint participation flag. |
 
 The table uses `EMIP_PK_COLUMN`, `EMIP_UK_COLUMN`, and `EMIP_IDX_COLUMN_OBJECT`. Object and column rows are persisted in the same repository transaction. The repository remains readable before this migration is applied and returns no columns until the table exists.
+
+## EMIP_COLUMN_LINEAGE
+
+`EMIP_COLUMN_LINEAGE` is the additive column-dependency store introduced by
+`scripts/sql/007_create_emip_column_lineage.sql`. Its deterministic UUID is derived
+from resolved source/target object identities, column names, classification, SQL,
+source context, and evidence, so repeated persistence is idempotent without relying
+on replaceable `EMIP_COLUMN.COLUMN_ID` values. Unresolved rows retain a nullable
+source object/column and a durable reason. The table is distributed by
+`TARGET_OBJECT_ID`; its primary key includes that distribution key, and a source
+object index supports reverse lookup.
+
+Repository reads remain backward compatible when the additive table is absent.
+Persistence resolves all candidate identities from one batched object load per call,
+and query/static-web consumers load lineage once rather than querying per column.

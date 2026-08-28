@@ -17,7 +17,7 @@ from threading import Lock
 from typing import Protocol
 from uuid import UUID
 
-from emip.domain import MetadataObject, Relation
+from emip.domain import ColumnLineage, MetadataObject, Relation
 from emip.scanner.file_reader import FileReader
 from emip.services.data_flow import DataFlowService
 from emip.services.dynamic_sql_details import dynamic_sql_details
@@ -30,6 +30,8 @@ class WebExportRepository(Protocol):
     def find_objects(self) -> list[MetadataObject]: ...
 
     def find_relations(self) -> list[Relation]: ...
+
+    def find_column_lineage(self) -> list[ColumnLineage]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,9 +85,14 @@ class StaticWebExporter:
         started_at = time.perf_counter()
         objects = sorted(self._repository.find_objects(), key=_object_sort_key)
         relations = list(self._repository.find_relations())
+        find_column_lineage = getattr(self._repository, "find_column_lineage", None)
+        column_lineage = find_column_lineage() if find_column_lineage else []
         by_id = {item.object_id: item for item in objects}
         flow_index = DataFlowService().prepare(objects, relations)
         dependencies, used_by = _relationship_indexes(by_id, relations)
+        incoming_columns, outgoing_columns = _column_lineage_indexes(
+            by_id, column_lineage
+        )
 
         object_dir = output_dir / "data" / "objects"
         flow_dir = output_dir / "data" / "flows"
@@ -110,6 +117,8 @@ class StaticWebExporter:
                     source_service,
                     dependencies[item.object_id],
                     used_by[item.object_id],
+                    incoming_columns[item.object_id],
+                    outgoing_columns[item.object_id],
                 ),
             )
             _write_json(output_dir / flow_path, flow_index.build(item, depth).to_dict())
@@ -278,11 +287,65 @@ def _related_item(item: MetadataObject, relation_type: str) -> dict[str, str]:
     }
 
 
+def _column_lineage_indexes(
+    by_id: dict[UUID, MetadataObject], lineage: Iterable[ColumnLineage]
+) -> tuple[
+    defaultdict[UUID, list[dict[str, object]]],
+    defaultdict[UUID, list[dict[str, object]]],
+]:
+    incoming: defaultdict[UUID, list[dict[str, object]]] = defaultdict(list)
+    outgoing: defaultdict[UUID, list[dict[str, object]]] = defaultdict(list)
+    for value in lineage:
+        if value.target_object_id not in by_id:
+            continue
+        source = (
+            by_id.get(value.source_object_id)
+            if value.source_object_id is not None
+            else None
+        )
+        target = by_id[value.target_object_id]
+        item: dict[str, object] = {
+            "lineage_id": str(value.lineage_id),
+            "classification": value.classification.value,
+            "source_object_id": (
+                str(value.source_object_id)
+                if value.source_object_id is not None
+                else None
+            ),
+            "source_qualified_name": source.qualified_name if source else None,
+            "source_column_name": value.source_column_name,
+            "target_object_id": str(value.target_object_id),
+            "target_qualified_name": target.qualified_name,
+            "target_column_name": value.target_column_name,
+            "expression": value.expression,
+            "source_type": value.source_type,
+            "unresolved_reason": value.unresolved_reason,
+        }
+        incoming[value.target_object_id].append(item)
+        if value.source_object_id in by_id:
+            outgoing[value.source_object_id].append(item)
+
+    def sort_key(item: dict[str, object]) -> tuple[str, str, str, str, str]:
+        return (
+            str(item["target_qualified_name"]).casefold(),
+            str(item["target_column_name"]).casefold(),
+            str(item["source_qualified_name"]).casefold(),
+            str(item["source_column_name"]).casefold(),
+            str(item["lineage_id"]),
+        )
+
+    for values in (*incoming.values(), *outgoing.values()):
+        values.sort(key=sort_key)
+    return incoming, outgoing
+
+
 def _detail_payload(
     item: MetadataObject,
     source_service: SourceTraceabilityService,
     dependencies: list[dict[str, str]],
     used_by: list[dict[str, str]],
+    incoming_columns: list[dict[str, object]],
+    outgoing_columns: list[dict[str, object]],
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -330,6 +393,10 @@ def _detail_payload(
         "source": source_service.retrieve(item),
         "dependencies": dependencies,
         "used_by": used_by,
+        "column_lineage": {
+            "incoming": incoming_columns,
+            "outgoing": outgoing_columns,
+        },
     }
 
 

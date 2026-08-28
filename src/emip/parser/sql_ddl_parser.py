@@ -104,9 +104,7 @@ class SqlDdlParser:
         for statement in statements:
             if not isinstance(statement, exp.Create):
                 continue
-            object_type = _SUPPORTED_TYPES.get(
-                str(statement.args.get("kind", "")).upper()
-            )
+            object_type = _create_object_type(statement)
             if object_type is None:
                 continue
             name, qualified_name = _object_names(statement)
@@ -117,7 +115,14 @@ class SqlDdlParser:
                 name=name,
                 description=(
                     source
-                    if object_type in {ObjectType.VIEW, ObjectType.FUNCTION}
+                    if object_type
+                    in {
+                        ObjectType.VIEW,
+                        ObjectType.MATERIALIZED_VIEW,
+                        ObjectType.FUNCTION,
+                        ObjectType.PROCEDURE,
+                        ObjectType.TRIGGER,
+                    }
                     else None
                 ),
             )
@@ -139,6 +144,17 @@ class SqlDdlParser:
         self._profiler.record("MetadataObject creation", 0.0, len(objects))
         self._profiler.count("Relation", relations)
         self._profiler.record("Relation extraction", 0.0, relations)
+
+
+def _create_object_type(statement: exp.Create) -> ObjectType | None:
+    """Map SQLGlot CREATE metadata, including its materialized-view property."""
+
+    kind = str(statement.args.get("kind", "")).upper()
+    properties = statement.args.get("properties")
+    if kind == "VIEW" and isinstance(properties, exp.Properties):
+        if properties.find(exp.MaterializedProperty) is not None:
+            return ObjectType.MATERIALIZED_VIEW
+    return _SUPPORTED_TYPES.get(kind)
 
 
 _IDENTIFIER = r"(?:\[[^]]+\]|" + r'"[^" ]+"' + r"|[A-Za-z_#][\w$#@]*)"

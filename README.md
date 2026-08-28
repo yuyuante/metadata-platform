@@ -104,6 +104,7 @@ python -m emip query used-by CUSTOMER
 python -m emip query path CUSTOMER ACCOUNT
 python -m emip query flow dbo.STKOUT --depth 6
 python -m emip query source dbo.STKOUT
+python -m emip query column-lineage dbo.STKOUT
 python -m emip query search customer --json
 ```
 
@@ -301,9 +302,16 @@ These cases need either richer static evidence, configuration ingestion, runtime
 
 ### 5. Column-level lineage / 欄位層級血緣
 
-**Current status: Not implemented as a complete end-to-end feature.**
+**Current status: Conservative foundation implemented.**
 
-EMIP can persist column metadata where available, but full column-to-column lineage across SQL expressions, mappings, dynamic SQL, Informatica overrides, and application embedded SQL is not yet implemented.
+EMIP persists evidence-rich `EXACT_DIRECT`, `EXACT_EXPRESSION`, and `UNRESOLVED`
+dependencies for explicit `INSERT ... SELECT` target columns and view/materialized
+view projections. Resolution uses SQLGlot AST scope plus already loaded object-column
+metadata; it never queries a database per reference. Unqualified columns require one
+unambiguous metadata owner, and `SELECT *` expands only from one source with complete,
+contiguously ordered columns. Exact reconstructed Dynamic SQL and exactly resolved
+Informatica embedded SQL reuse this analyzer. Possible/unresolved Dynamic SQL and
+Informatica transformation-port lineage remain outside this milestone.
 
 ### 6. Unsupported or invalid source / 不支援或無效的來源
 
@@ -339,7 +347,8 @@ The highest-value parser improvements are currently:
 1. Extend Dynamic SQL output with confidence/evidence/unresolved-reason metadata.
 2. Add Python embedded-SQL parsing using language AST rather than regex.
 3. Add Java, C#, C/C++, Shell, and other source-language parsers incrementally.
-4. Build column-level lineage only after object-level cross-provider semantics remain stable.
+4. Extend the conservative column-lineage foundation to additional AST-supported SQL
+   forms and transformation-port models without weakening its exactness boundary.
 
 ## Project Overview / 專案概覽
 
@@ -491,7 +500,8 @@ The platform is already useful for **object-level technical metadata and develop
   mapping-definition parameters remain unresolved.
 - Java, Python, C#, C/C++, Shell, Perl, and other embedded-SQL source-language parsers are not implemented.
 - Dynamic SQL is limited to deterministic static folding; runtime-dependent cases remain unresolved.
-- Complete column-level lineage and impact analysis are not implemented.
+- Column-level lineage supports a conservative SQL foundation; complete transformation-
+  port, runtime-generated SQL, and application-language coverage is not implemented.
 - Incremental scanning and metadata version persistence are not implemented.
 - REST API, MCP Server, AI/LLM analysis, PII detection, and server-backed UI are not implemented.
 - Invalid or unsupported SQL is reported rather than silently repaired.

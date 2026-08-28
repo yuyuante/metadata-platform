@@ -8,7 +8,13 @@ from fnmatch import fnmatchcase
 from typing import Protocol, cast
 from uuid import UUID
 
-from emip.domain import MetadataObject, ObjectType, Relation, RelationType
+from emip.domain import (
+    ColumnLineage,
+    MetadataObject,
+    ObjectType,
+    Relation,
+    RelationType,
+)
 from emip.services.data_flow import DataFlowService
 from emip.services.dynamic_sql_details import dynamic_sql_details
 from emip.services.source_traceability import SourceTraceabilityService
@@ -20,6 +26,8 @@ class QueryRepository(Protocol):
     def find_objects(self) -> list[MetadataObject]: ...
 
     def find_relations(self) -> list[Relation]: ...
+
+    def find_column_lineage(self) -> list[ColumnLineage]: ...
 
 
 def _identity(value: str) -> str:
@@ -103,6 +111,8 @@ class QueryEngine:
         self._objects = repository.find_objects()
         self._by_id = {item.object_id: item for item in self._objects}
         self._relations = repository.find_relations()
+        find_column_lineage = getattr(repository, "find_column_lineage", None)
+        self._column_lineage = find_column_lineage() if find_column_lineage else []
         self._outgoing: dict[UUID, list[Relation]] = defaultdict(list)
         self._incoming: dict[UUID, list[Relation]] = defaultdict(list)
         for relation in self._relations:
@@ -246,6 +256,61 @@ class QueryEngine:
 
     def object_lookup(self, term: str) -> dict[str, object]:
         return _object_dict(self.resolve(term))
+
+    def column_lineage(self, term: str) -> dict[str, object]:
+        """Return persisted incoming and outgoing column dependencies."""
+
+        item = self.resolve(term)
+
+        def serialize(lineage: ColumnLineage) -> dict[str, object]:
+            source = (
+                self._by_id.get(lineage.source_object_id)
+                if lineage.source_object_id is not None
+                else None
+            )
+            target = self._by_id.get(lineage.target_object_id)
+            return {
+                "lineage_id": str(lineage.lineage_id),
+                "classification": lineage.classification.value,
+                "source_object_id": (
+                    str(lineage.source_object_id)
+                    if lineage.source_object_id is not None
+                    else None
+                ),
+                "source_qualified_name": (
+                    source.qualified_name if source is not None else None
+                ),
+                "source_column_name": lineage.source_column_name,
+                "target_object_id": str(lineage.target_object_id),
+                "target_qualified_name": (
+                    target.qualified_name if target is not None else None
+                ),
+                "target_column_name": lineage.target_column_name,
+                "expression": lineage.expression,
+                "statement_sql": lineage.statement_sql,
+                "source_type": lineage.source_type,
+                "source_root": lineage.source_root,
+                "source_file": lineage.source_file,
+                "source_object": lineage.source_object,
+                "evidence": lineage.evidence,
+                "unresolved_reason": lineage.unresolved_reason,
+            }
+
+        incoming = [
+            serialize(lineage)
+            for lineage in self._column_lineage
+            if lineage.target_object_id == item.object_id
+        ]
+        outgoing = [
+            serialize(lineage)
+            for lineage in self._column_lineage
+            if lineage.source_object_id == item.object_id
+        ]
+        return {
+            "object": _object_dict(item),
+            "incoming": incoming,
+            "outgoing": outgoing,
+        }
 
     def flow(self, term: str, depth: int = 6) -> dict[str, object]:
         """Return a deterministic, bounded semantic data-flow projection."""

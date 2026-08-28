@@ -9,7 +9,8 @@ The metadata model is the canonical, database-independent language shared by sca
 - **ObjectProperty** stores extensible key/value metadata such as encoding, delimiter, file format, database name, language version, or charset.
 - **Column** represents a column belonging to a table, file, or another column-bearing object.
 - **Relation** represents a typed object dependency such as `READS`, `WRITES`, `CALLS`, `IMPORTS`, `EXPORTS`, `LOOKUP`, `GENERATES`, `DEPENDS_ON`, `BELONGS_TO`, `EXECUTES`, or `PRECEDES`.
-- **ColumnRelation** represents column-level lineage and keeps the initial transformation expression as plain text.
+- **ColumnLineageCandidate** is immutable AST-derived evidence awaiting durable object resolution.
+- **ColumnLineage** is the immutable persisted dependency model. It identifies source and target objects/columns, classifies the dependency as `EXACT_DIRECT`, `EXACT_EXPRESSION`, or `UNRESOLVED`, and retains the expression, statement, source context, provenance evidence, and unresolved reason.
 - **ScanJob**, **ScanTarget**, and **ScanResult** represent scan execution state, input targets, and aggregate results.
 - **Tag** and **ObjectTag** provide reusable labels and many-to-many object tagging.
 - **PIIRule** and **PIIResult** describe future sensitive-data classification metadata. Detection is not implemented in this sprint.
@@ -35,6 +36,6 @@ All entity identifiers are UUIDs. Timestamps are timezone-aware UTC values. Rela
 Built-in `ObjectType`, `RelationType`, `ScanStatus`, and `DetectionMethod` values are represented as string enums. The domain fields accept the corresponding enum or a namespaced string value, allowing plugins to introduce categories such as `vendor:oracle_package` without changing a database schema or core business logic. Core services should treat unknown extension values as data and avoid exhaustive branching over enum members.
 
 Future model additions should follow the same approach: add a domain object or optional property only when the concept is shared across integrations; keep parser-specific details in `ObjectProperty` or plugin-owned extension data. This preserves one canonical model while allowing SQL, Informatica, Java, Python, C#, C++, Perl, shell, REST API, file, and FTP plugins to evolve independently.
-`MetadataObject.columns` contains the ordered columns discovered for a column-bearing object. The parser assigns stable column UUIDs and the parent `object_id`. The repository persists these records in `EMIP_COLUMN` in the same transaction as the object insert or update, so future lineage and impact analysis can use column identifiers.
+`MetadataObject.columns` contains the ordered columns discovered for a column-bearing object. The parser assigns column UUIDs and the parent `object_id`. The repository persists these records in `EMIP_COLUMN` in the same transaction as the object insert or update.
 
-Column extraction is limited to metadata present in the DDL: column name, ordinal position, datatype, default expression, nullability, and primary-key/unique participation. It does not infer dependencies or lineage.
+Column extraction is limited to metadata present in the DDL: column name, ordinal position, datatype, default expression, nullability, and primary-key/unique participation. Because parser-created column UUIDs can change when an object is reconciled, `ColumnLineage` uses stable object identities plus column names as its durable boundary rather than storing those transient UUIDs.
