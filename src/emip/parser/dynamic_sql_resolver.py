@@ -81,6 +81,10 @@ class DynamicSqlResolver:
     """Resolve only source-proven literals and constant-variable expressions."""
 
     _EXEC = re.compile(r"\b(?:sp_executesql|EXEC(?:UTE)?)\b", re.I)
+    _CALLABLE_IDENTIFIER = re.compile(
+        r"^(?:\[[^]]+\]|\"[^\"]+\"|[A-Za-z_#][\w$#@]*)"
+        r"(?:\s*\.\s*(?:\[[^]]+\]|\"[^\"]+\"|[A-Za-z_#][\w$#@]*)){0,2}$"
+    )
     _ASSIGN = re.compile(
         r"^\s*(?:(?:SET|SELECT)\s+)?(?P<name>@?[A-Za-z_]\w*)\s*:?=\s*(?P<expr>.+?)\s*$",
         re.I | re.S,
@@ -201,6 +205,7 @@ class DynamicSqlResolver:
     def _executions(self, source: str) -> list[_Execution]:
         result: list[_Execution] = []
         executable_mask = _mask_literals(source)
+        assigned_names = self._assigned_names(source)
         claimed_until = 0
         for match in self._EXEC.finditer(executable_mask):
             if match.start() < claimed_until:
@@ -220,9 +225,34 @@ class DynamicSqlResolver:
             if re.match(r"(?:FUNCTION|PROCEDURE)\b", target, re.I):
                 continue
             expression, _ = _statement_expression(source, start)
+            if self._is_static_procedure_call(expression, construct, assigned_names):
+                continue
             if expression.strip():
                 result.append(_Execution(match.start(), expression, construct))
         return result
+
+    def _assigned_names(self, source: str) -> set[str]:
+        names = {
+            match.group(1).lstrip("@").lower()
+            for match in re.finditer(
+                r"(?<![\w@])(@?[A-Za-z_]\w*)\s*:=", _mask_literals(source)
+            )
+        }
+        for _, _, statement in self._statements(source):
+            match = self._DECLARE.match(statement) or self._ASSIGN.match(statement)
+            if match:
+                names.add(match.group("name").lstrip("@").lower())
+        return names
+
+    def _is_static_procedure_call(
+        self, expression: str, construct: str, assigned_names: set[str]
+    ) -> bool:
+        if construct not in {"EXEC", "EXECUTE"}:
+            return False
+        target = expression.strip().rstrip(";").strip()
+        if not self._CALLABLE_IDENTIFIER.fullmatch(target):
+            return False
+        return target.lstrip("@").lower() not in assigned_names
 
     def _statements(self, source: str) -> list[tuple[int, str, str]]:
         result: list[tuple[int, str, str]] = []

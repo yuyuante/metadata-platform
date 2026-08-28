@@ -62,6 +62,44 @@ def test_static_sql_is_distinct_and_comments_or_literals_do_not_trigger() -> Non
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        "EXEC dbo.RefreshInventory;",
+        "EXECUTE dbo.RefreshInventory;",
+        "EXEC proc_gen_F29;",
+        "EXECUTE proc_gen_F29;",
+    ],
+)
+def test_static_procedure_calls_are_not_dynamic_sql(source: str) -> None:
+    result = DynamicSqlResolver().resolve(source)
+
+    assert result.classification is DynamicSqlClassification.STATIC_EXACT
+    assert not result.contains_dynamic_sql
+    assert result.evidence == ()
+    assert result.unresolved_reason is None
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "EXEC(@sql);",
+        "EXEC @sql;",
+        "EXEC 'SELECT * FROM dbo.T';",
+        "EXECUTE 'SELECT * FROM dbo.T';",
+        "EXEC sp_executesql @sql;",
+        "EXECUTE sp_executesql @sql;",
+        "EXECUTE IMMEDIATE v_sql;",
+    ],
+)
+def test_dynamic_execution_constructs_remain_dynamic_sql(source: str) -> None:
+    result = DynamicSqlResolver().resolve(source)
+
+    assert result.contains_dynamic_sql
+    assert result.classification is not DynamicSqlClassification.STATIC_EXACT
+    assert result.evidence
+
+
+@pytest.mark.parametrize(
     ("source", "reason"),
     [
         ("EXEC(@runtime_sql);", DynamicSqlUnresolvedReason.RUNTIME_VARIABLE_UNKNOWN),

@@ -455,6 +455,40 @@ def test_dynamic_parse_is_repeatable(tmp_path: Path) -> None:
     assert first.relation_candidates == second.relation_candidates
 
 
+@pytest.mark.parametrize(
+    ("statement", "target"),
+    [
+        ("EXEC dbo.RefreshInventory;", "dbo.RefreshInventory"),
+        ("EXECUTE dbo.RefreshInventory;", "dbo.RefreshInventory"),
+        ("EXEC proc_gen_F29;", "proc_gen_F29"),
+        ("EXECUTE proc_gen_F29;", "proc_gen_F29"),
+    ],
+)
+def test_static_procedure_calls_keep_calls_lineage_without_dynamic_properties(
+    tmp_path: Path, statement: str, target: str
+) -> None:
+    sql = f"CREATE PROCEDURE dbo.caller AS BEGIN {statement} END;"
+
+    obj = _parse(tmp_path, sql)[0]
+    calls = [
+        candidate
+        for candidate in obj.relation_candidates
+        if candidate.relation_type.value == "CALLS"
+    ]
+
+    assert any(
+        candidate.target_qualified_name == target
+        and candidate.source_type == "STATIC_SQL"
+        for candidate in calls
+    )
+    assert not any(
+        item.property_name == "contains_dynamic_sql" for item in obj.properties
+    )
+    assert not any(
+        item.property_name.startswith("dynamic_sql") for item in obj.properties
+    )
+
+
 def test_trigger_preserves_update_of_columns(tmp_path: Path) -> None:
     sql = """
     CREATE TRIGGER sales.audit_customer
