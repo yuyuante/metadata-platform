@@ -297,13 +297,20 @@ def test_create_relations_honors_resolved_target_provider() -> None:
 
 def test_create_column_lineage_uses_stable_key_and_one_object_load() -> None:
     class Cursor:
-        rowcount = 1
+        rowcount = 0
+
+        def __init__(self) -> None:
+            self.results: list[tuple[str]] = []
+            self.table_name = ""
 
         def __enter__(self) -> "Cursor":
             return self
 
         def __exit__(self, *args: object) -> None:
             del args
+
+        def fetchall(self) -> list[tuple[str]]:
+            return self.results
 
     class Connection:
         commits = 0
@@ -347,17 +354,42 @@ def test_create_column_lineage_uses_stable_key_and_one_object_load() -> None:
     )
     object_loads = 0
     inserted: list[list[tuple[object, ...]]] = []
+    insert_sql: list[str] = []
+    selected_ids: list[tuple[str, list[str]]] = []
+    existing_ids = {
+        "emip_column_lineage": set(),
+        "emip_column_lineage_unresolved": set(),
+    }
 
     def find_objects() -> list[MetadataObject]:
         nonlocal object_loads
         object_loads += 1
         return [source, target, owner]
 
-    def capture_rows(
-        cursor: object, query: object, rows: list[tuple[object, ...]]
+    def capture_existing(
+        cursor: Cursor, query: object, params: tuple[list[str]]
     ) -> None:
-        del cursor, query
+        query_text = str(query)
+        table_name = (
+            "emip_column_lineage_unresolved"
+            if "emip_column_lineage_unresolved" in query_text
+            else "emip_column_lineage"
+        )
+        cursor.table_name = table_name
+        selected_ids.append((table_name, params[0]))
+        cursor.results = [
+            (lineage_id,)
+            for lineage_id in params[0]
+            if lineage_id in existing_ids[table_name]
+        ]
+
+    def capture_rows(
+        cursor: Cursor, query: object, rows: list[tuple[object, ...]]
+    ) -> None:
+        insert_sql.append(str(query))
         inserted.append(rows)
+        existing_ids[cursor.table_name].update(str(row[0]) for row in rows)
+        cursor.rowcount = len(rows)
 
     repository = MetadataRepository.__new__(MetadataRepository)
     repository._connection = Connection()
@@ -366,13 +398,16 @@ def test_create_column_lineage_uses_stable_key_and_one_object_load() -> None:
         "emip_column_lineage_unresolved"
     )
     repository.find_objects = find_objects  # type: ignore[method-assign]
+    repository._execute = capture_existing  # type: ignore[method-assign]
     repository._execute_values = capture_rows  # type: ignore[method-assign]
 
     assert repository.create_column_lineage([(owner, candidate)]) == 1
-    assert repository.create_column_lineage([(owner, candidate)]) == 1
+    first_lineage_id = inserted[0][0][0]
+    assert repository.create_column_lineage([(owner, candidate)]) == 0
 
     assert object_loads == 2
-    assert inserted[0][0][0] == inserted[1][0][0]
+    assert len(inserted) == 1
+    assert selected_ids[0][1] == selected_ids[1][1] == [first_lineage_id]
     assert inserted[0][0][1:5] == (
         str(target.object_id),
         "id",
@@ -385,7 +420,7 @@ def test_create_column_lineage_uses_stable_key_and_one_object_load() -> None:
         target_qualified_name="missing_schema.missing_target",
     )
     assert repository.create_column_lineage([(owner, unresolved_exact)]) == 0
-    assert len(inserted) == 2
+    assert len(inserted) == 1
 
     unresolved = replace(
         candidate,
@@ -395,13 +430,18 @@ def test_create_column_lineage_uses_stable_key_and_one_object_load() -> None:
         unresolved_reason="TARGET_OBJECT_UNRESOLVED",
     )
     assert repository.create_column_lineage([(owner, unresolved)]) == 1
-    assert inserted[2][0][1:5] == (
+    unresolved_lineage_id = inserted[1][0][0]
+    assert repository.create_column_lineage([(owner, unresolved)]) == 0
+    assert selected_ids[-2][1] == selected_ids[-1][1] == [unresolved_lineage_id]
+    assert inserted[1][0][1:5] == (
         "missing_schema.missing_target",
         "missing_id",
         str(source.object_id),
         "source_id",
     )
-    assert str(target.object_id) not in inserted[2][0]
+    assert str(target.object_id) not in inserted[1][0]
+    assert len(inserted) == 2
+    assert all("ON CONFLICT" not in query for query in insert_sql)
 
 
 def test_find_column_lineage_reloads_unresolved_target_without_object_id() -> None:

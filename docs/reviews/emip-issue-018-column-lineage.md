@@ -34,10 +34,13 @@ table for unresolved target objects, distributed and keyed by lineage ID. It ret
 the unresolved qualified name without inventing a target object identity; exact rows
 still require a resolved target and remain in the resolved lineage table.
 Stable UUIDv5 keys use resolved object IDs plus column names and all provenance that
-distinguishes source occurrences; `ON CONFLICT DO NOTHING` makes repeated persistence
-idempotent. Candidate identity resolution performs one batched object/column load per
-persistence call. Missing additive tables remain backward compatible. Detached
-`find_objects()` and `find_physical_objects()` now restore ordered columns.
+distinguishes source occurrences. Persistence preloads existing IDs with one bounded
+`ANY(uuid[])` query for each populated resolved/unresolved table, filters candidates
+in memory, and bulk-inserts only missing rows. This is idempotent on Greenplum 6 /
+PostgreSQL 9.4 without per-row queries or inserts. Candidate identity resolution
+performs one batched object/column load per persistence call. Missing additive tables
+remain backward compatible. Detached `find_objects()` and
+`find_physical_objects()` now restore ordered columns.
 
 ## Supported SQL forms
 
@@ -132,9 +135,10 @@ export was run.
 
 Integration builds one in-memory suffix catalog from current plus persisted physical
 objects. Resolution performs no database query per star, table, or column. Persistence
-uses one object reload and one bulk insert per candidate batch. QueryEngine and each
-static export load the complete lineage relation once. Development used focused unit
-tests and named production files; no background or recursive production workload was
+uses one object reload, one bounded existing-ID lookup per populated lineage table,
+and at most one bulk insert per table and candidate batch. QueryEngine and each static
+export load the complete lineage relation once. Development used focused unit tests
+and named production files; no background or recursive production workload was
 started.
 
 ## Quality gates

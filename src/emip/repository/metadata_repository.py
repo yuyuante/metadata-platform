@@ -1056,31 +1056,48 @@ class MetadataRepository:
                         *common_values,
                     )
                 )
+        resolved_existing = sql.SQL(
+            "SELECT lineage_id FROM {} WHERE lineage_id = ANY(%s::uuid[])"
+        ).format(self._column_lineage_table_identifier)
         resolved_insert = sql.SQL(
             "INSERT INTO {} (lineage_id, target_object_id, target_column_name, "
             "source_object_id, source_column_name, classification, expression, "
             "statement_sql, source_type, source_root, source_file, source_object, "
-            "evidence, unresolved_reason) VALUES %s ON CONFLICT DO NOTHING"
+            "evidence, unresolved_reason) VALUES %s"
         ).format(self._column_lineage_table_identifier)
+        unresolved_existing = sql.SQL(
+            "SELECT lineage_id FROM {} WHERE lineage_id = ANY(%s::uuid[])"
+        ).format(self._column_lineage_unresolved_table_identifier)
         unresolved_insert = sql.SQL(
             "INSERT INTO {} (lineage_id, target_qualified_name, "
             "target_column_name, source_object_id, source_column_name, "
             "classification, expression, statement_sql, source_type, source_root, "
             "source_file, source_object, evidence, unresolved_reason) "
-            "VALUES %s ON CONFLICT DO NOTHING"
+            "VALUES %s"
         ).format(self._column_lineage_unresolved_table_identifier)
 
         inserted = 0
-        for query, rows in (
-            (resolved_insert, resolved_rows),
-            (unresolved_insert, unresolved_rows),
+        for existing_query, insert_query, rows in (
+            (resolved_existing, resolved_insert, resolved_rows),
+            (unresolved_existing, unresolved_insert, unresolved_rows),
         ):
             if not rows:
                 continue
+            unique_rows: dict[str, tuple[object, ...]] = {}
+            for row in rows:
+                unique_rows.setdefault(str(row[0]), row)
             try:
                 with self._connection.cursor() as cursor:
-                    self._execute_values(cursor, query, rows)
-                    inserted += int(max(cursor.rowcount, 0))
+                    self._execute(cursor, existing_query, (list(unique_rows),))
+                    existing_ids = {str(row[0]) for row in cursor.fetchall()}
+                    missing_rows = [
+                        row
+                        for lineage_id, row in unique_rows.items()
+                        if lineage_id not in existing_ids
+                    ]
+                    if missing_rows:
+                        self._execute_values(cursor, insert_query, missing_rows)
+                        inserted += int(max(cursor.rowcount, 0))
                 self._connection.commit()
             except psycopg2.errors.UndefinedTable:
                 self._connection.rollback()

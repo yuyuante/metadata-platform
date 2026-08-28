@@ -77,7 +77,10 @@ object index supports reverse lookup.
 
 Repository reads remain backward compatible when the additive table is absent.
 Persistence resolves all candidate identities from one batched object load per call,
-and query/static-web consumers load lineage once rather than querying per column.
+preloads existing stable lineage IDs with one candidate-bounded `ANY(uuid[])` query
+per populated lineage table, and bulk-inserts only missing rows. This preserves
+idempotency without PostgreSQL 9.5 `ON CONFLICT` syntax or per-row queries/inserts.
+Query/static-web consumers load lineage once rather than querying per column.
 
 ## EMIP_COLUMN_LINEAGE_UNRESOLVED
 
