@@ -82,6 +82,32 @@ def test_object_lookup_and_wildcard_search() -> None:
     assert len(engine.search("vw_cust*")) == 1
 
 
+def test_object_lookup_exposes_persisted_dynamic_sql_evidence() -> None:
+    item = _object(ObjectType.PROCEDURE, "sales.refresh", "refresh")
+    item.properties = (
+        ObjectProperty(
+            property_name="dynamic_sql.classification",
+            property_value="UNRESOLVED",
+        ),
+        ObjectProperty(
+            property_name="dynamic_sql.unresolved_reason",
+            property_value="RUNTIME_VARIABLE_UNKNOWN",
+        ),
+        ObjectProperty(
+            property_name="dynamic_sql.evidence",
+            property_value='[{"original_statement":"EXEC(@sql)"}]',
+        ),
+    )
+
+    result = QueryEngine(FakeRepository([item], [])).object_lookup("sales.refresh")
+
+    assert result["dynamic_sql"] == {
+        "classification": "UNRESOLVED",
+        "unresolved_reason": "RUNTIME_VARIABLE_UNKNOWN",
+        "evidence": [{"original_statement": "EXEC(@sql)"}],
+    }
+
+
 def test_flow_and_source_resolve_stable_object_id(tmp_path) -> None:
     engine, objects = _engine()
     customer = objects["customer"]

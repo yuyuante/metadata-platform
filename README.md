@@ -257,7 +257,7 @@ SET @sql = 'SELECT * ' + 'FROM dbo.STKOUT';
 EXEC(@sql);
 ```
 
-The resolver supports literal strings, simple variable assignment, and simple `+` / `||` concatenation when all inputs are statically known.
+The resolver supports literal strings, simple variable assignment, and simple `+` / `||` concatenation when all inputs are statically known. Results are classified as `STATIC_EXACT`, `DYNAMIC_EXACT`, `POSSIBLE`, or `UNRESOLVED`; only exact classifications can create normal lineage. `query object` and web object detail data expose durable classification, original/reconstructed statements, contributing constants, execution construct, source context, and a stable unresolved reason. See [Dynamic SQL static analysis](docs/emip/dynamic-sql.md).
 
 The resolver intentionally returns unresolved when runtime information is required. Examples include:
 

@@ -296,6 +296,17 @@ def _print_query_result(result: object, as_json: bool) -> None:
             "description",
         ):
             print(f"{key.replace('_', ' ').title()}: {result.get(key) or ''}")
+        dynamic_sql = result.get("dynamic_sql")
+        if isinstance(dynamic_sql, dict):
+            print(
+                f"Dynamic SQL Classification: {dynamic_sql.get('classification', '')}"
+            )
+            reason = dynamic_sql.get("unresolved_reason")
+            if reason:
+                print(f"Dynamic SQL Reason: {reason}")
+            evidence = dynamic_sql.get("evidence")
+            if isinstance(evidence, list):
+                print(f"Dynamic SQL Evidence: {len(evidence)} execution(s)")
         return
     if isinstance(result, dict) and {"root", "nodes", "edges"} <= result.keys():
         _print_flow_result(result)

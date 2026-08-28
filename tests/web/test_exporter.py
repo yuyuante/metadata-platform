@@ -9,6 +9,7 @@ import pytest
 
 from emip.domain import (
     MetadataObject,
+    ObjectProperty,
     ObjectType,
     Relation,
     RelationType,
@@ -268,6 +269,50 @@ def test_export_source_is_rendered_as_text_and_missing_source_is_a_warning(
     javascript = (output / "app.js").read_text(encoding="utf-8")
     assert ".textContent" in javascript
     assert "innerHTML" not in javascript
+
+
+def test_detail_exposes_dynamic_sql_evidence_as_safe_deterministic_data(
+    tmp_path: Path,
+) -> None:
+    object_id = "00000000-0000-4000-8000-000000000030"
+    item = _object(object_id, ObjectType.PROCEDURE, "sales.refresh")
+    item.properties = (
+        ObjectProperty(
+            property_name="dynamic_sql.classification", property_value="POSSIBLE"
+        ),
+        ObjectProperty(
+            property_name="dynamic_sql.unresolved_reason",
+            property_value="CONDITIONAL_AMBIGUITY",
+        ),
+        ObjectProperty(
+            property_name="dynamic_sql.evidence",
+            property_value=(
+                '[{"original_statement":"EXEC(\u003c/script\u003e)",'
+                '"reconstructed_sql":null,"source_file":"unsafe.sql"}]'
+            ),
+        ),
+    )
+    output = tmp_path / "web-dist"
+
+    exporter = StaticWebExporter(CountingRepository([item], []))
+    exporter.export(output)
+    first = (output / "data" / "objects" / f"{object_id}.json").read_bytes()
+    exporter.export(output)
+    second = (output / "data" / "objects" / f"{object_id}.json").read_bytes()
+    detail = _read_json(output / "data" / "objects" / f"{object_id}.json")
+
+    assert first == second
+    assert detail["dynamic_sql"] == {
+        "classification": "POSSIBLE",
+        "unresolved_reason": "CONDITIONAL_AMBIGUITY",
+        "evidence": [
+            {
+                "original_statement": "EXEC(</script>)",
+                "reconstructed_sql": None,
+                "source_file": "unsafe.sql",
+            }
+        ],
+    }
 
 
 def test_browser_uses_lazy_search_shards_and_restorable_history(tmp_path: Path) -> None:

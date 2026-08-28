@@ -17,3 +17,11 @@ Dynamic SQL is therefore resolved only when every character of the executed SQL 
 deterministic. Unresolved SQL is preserved with its original source and marked as
 Dynamic SQL. EMIP never guesses a target or fabricates a relationship from an
 incomplete expression.
+
+Classification is explicit: `STATIC_EXACT`, `DYNAMIC_EXACT`, `POSSIBLE`, or
+`UNRESOLVED`. Only the first two may feed normal relation extraction. Dynamic
+literal/comment bodies are masked from static extraction, so possible and
+unresolved evidence cannot create false exact edges. Classification, stable
+unresolved reason, original/reconstructed statements, contributing constants,
+execution construct, and source context are serialized through existing object
+properties and exposed by the existing query and static-web detail paths.
