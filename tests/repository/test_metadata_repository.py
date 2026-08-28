@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -361,6 +362,9 @@ def test_create_column_lineage_uses_stable_key_and_one_object_load() -> None:
     repository = MetadataRepository.__new__(MetadataRepository)
     repository._connection = Connection()
     repository._column_lineage_table_identifier = sql.Identifier("emip_column_lineage")
+    repository._column_lineage_unresolved_table_identifier = sql.Identifier(
+        "emip_column_lineage_unresolved"
+    )
     repository.find_objects = find_objects  # type: ignore[method-assign]
     repository._execute_values = capture_rows  # type: ignore[method-assign]
 
@@ -375,3 +379,98 @@ def test_create_column_lineage_uses_stable_key_and_one_object_load() -> None:
         str(source.object_id),
         "source_id",
     )
+
+    unresolved_exact = replace(
+        candidate,
+        target_qualified_name="missing_schema.missing_target",
+    )
+    assert repository.create_column_lineage([(owner, unresolved_exact)]) == 0
+    assert len(inserted) == 2
+
+    unresolved = replace(
+        candidate,
+        target_qualified_name="missing_schema.missing_target",
+        target_column_name="missing_id",
+        classification=ColumnLineageClassification.UNRESOLVED,
+        unresolved_reason="TARGET_OBJECT_UNRESOLVED",
+    )
+    assert repository.create_column_lineage([(owner, unresolved)]) == 1
+    assert inserted[2][0][1:5] == (
+        "missing_schema.missing_target",
+        "missing_id",
+        str(source.object_id),
+        "source_id",
+    )
+    assert str(target.object_id) not in inserted[2][0]
+
+
+def test_find_column_lineage_reloads_unresolved_target_without_object_id() -> None:
+    lineage_id = uuid4()
+    source_id = uuid4()
+    result_sets = [
+        [],
+        [
+            (
+                str(lineage_id),
+                None,
+                "missing_schema.missing_target",
+                "target_id",
+                str(source_id),
+                "source_id",
+                "UNRESOLVED",
+                "s.source_id",
+                "INSERT INTO missing_schema.missing_target (target_id) SELECT "
+                "s.source_id FROM dbo.source_table AS s",
+                "STATIC_SQL",
+                "D:/sql",
+                "load_missing.sql",
+                "dbo.load_missing",
+                '{"target":"missing_schema.missing_target"}',
+                "TARGET_OBJECT_UNRESOLVED",
+            )
+        ],
+    ]
+
+    class Cursor:
+        def __init__(self, rows: list[tuple[object, ...]]) -> None:
+            self.rows = rows
+
+        def __enter__(self) -> "Cursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return self.rows
+
+    class Connection:
+        def cursor(self) -> Cursor:
+            return Cursor(result_sets.pop(0))
+
+        def rollback(self) -> None:
+            raise AssertionError("rollback was not expected")
+
+    repository = MetadataRepository.__new__(MetadataRepository)
+    repository._connection = Connection()
+    repository._column_lineage_table_identifier = sql.Identifier("emip_column_lineage")
+    repository._column_lineage_unresolved_table_identifier = sql.Identifier(
+        "emip_column_lineage_unresolved"
+    )
+    repository._execute = lambda cursor, query: None  # type: ignore[method-assign]
+
+    lineage = repository.find_column_lineage()
+
+    assert len(lineage) == 1
+    assert lineage[0].lineage_id == lineage_id
+    assert lineage[0].target_object_id is None
+    assert lineage[0].target_qualified_name == "missing_schema.missing_target"
+    assert lineage[0].target_column_name == "target_id"
+    assert lineage[0].source_object_id == source_id
+    assert lineage[0].source_column_name == "source_id"
+    assert lineage[0].classification is ColumnLineageClassification.UNRESOLVED
+    assert lineage[0].expression == "s.source_id"
+    assert "INSERT INTO missing_schema.missing_target" in lineage[0].statement_sql
+    assert lineage[0].source_object == "dbo.load_missing"
+    assert "missing_schema.missing_target" in lineage[0].evidence
+    assert lineage[0].unresolved_reason == "TARGET_OBJECT_UNRESOLVED"

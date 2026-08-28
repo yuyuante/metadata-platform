@@ -159,7 +159,8 @@ class ColumnLineage:
     """Durable, evidence-rich column dependency loaded from the repository."""
 
     lineage_id: UUID
-    target_object_id: UUID
+    target_object_id: UUID | None
+    target_qualified_name: str | None
     target_column_name: str
     classification: ColumnLineageClassification
     expression: str

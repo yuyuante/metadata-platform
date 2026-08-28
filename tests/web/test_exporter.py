@@ -123,6 +123,7 @@ def test_export_is_partitioned_deterministic_and_reads_repository_once(
             source_object_id=source.object_id,
             source_column_name="STK_ID",
             target_object_id=table.object_id,
+            target_qualified_name=table.qualified_name,
             target_column_name="STK_ID",
             classification=ColumnLineageClassification.EXACT_DIRECT,
             expression="s.STK_ID",

@@ -78,3 +78,17 @@ object index supports reverse lookup.
 Repository reads remain backward compatible when the additive table is absent.
 Persistence resolves all candidate identities from one batched object load per call,
 and query/static-web consumers load lineage once rather than querying per column.
+
+## EMIP_COLUMN_LINEAGE_UNRESOLVED
+
+`EMIP_COLUMN_LINEAGE_UNRESOLVED` is the additive evidence store introduced by
+`scripts/sql/008_create_emip_column_lineage_unresolved.sql` for findings whose target
+object cannot be resolved. It deliberately stores `TARGET_QUALIFIED_NAME` instead of
+fabricating a target object UUID. The row retains target-column text, classification,
+expression and statement SQL, source context, evidence, and the unresolved reason.
+
+The table is distributed by `LINEAGE_ID`, which is also its primary key, so the schema
+is safe for Greenplum's distribution-key constraints. Resolved-target rows continue to
+use `EMIP_COLUMN_LINEAGE`; exact lineage is never written to the unresolved-target
+table. Repository reads tolerate either additive lineage table being absent, allowing
+the migration to be deployed independently and preserving backward compatibility.

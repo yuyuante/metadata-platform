@@ -15,6 +15,7 @@ from emip.database import DatabaseConnection, DatabaseNaming
 from emip.database.tables import (
     COLUMN,
     COLUMN_LINEAGE,
+    COLUMN_LINEAGE_UNRESOLVED,
     OBJECT,
     PROPERTY,
     RELATION,
@@ -170,19 +171,20 @@ def _row_to_relation(row: tuple[Any, ...]) -> Relation:
 def _row_to_column_lineage(row: tuple[Any, ...]) -> ColumnLineage:
     return ColumnLineage(
         lineage_id=UUID(str(row[0])),
-        target_object_id=UUID(str(row[1])),
-        target_column_name=row[2],
-        source_object_id=UUID(str(row[3])) if row[3] is not None else None,
-        source_column_name=row[4],
-        classification=ColumnLineageClassification(row[5]),
-        expression=row[6],
-        statement_sql=row[7],
-        source_type=row[8],
-        source_root=row[9],
-        source_file=row[10],
-        source_object=row[11],
-        evidence=row[12],
-        unresolved_reason=row[13],
+        target_object_id=UUID(str(row[1])) if row[1] is not None else None,
+        target_qualified_name=row[2],
+        target_column_name=row[3],
+        source_object_id=UUID(str(row[4])) if row[4] is not None else None,
+        source_column_name=row[5],
+        classification=ColumnLineageClassification(row[6]),
+        expression=row[7],
+        statement_sql=row[8],
+        source_type=row[9],
+        source_root=row[10],
+        source_file=row[11],
+        source_object=row[12],
+        evidence=row[13],
+        unresolved_reason=row[14],
     )
 
 
@@ -220,6 +222,12 @@ class MetadataRepository:
         ).table(COLUMN_LINEAGE)
         self._column_lineage_table_identifier = sql.Identifier(
             *(part.lower() for part in qualified_column_lineage_table.split("."))
+        )
+        qualified_unresolved_lineage_table = DatabaseNaming(
+            settings.schema, settings.table_prefix
+        ).table(COLUMN_LINEAGE_UNRESOLVED)
+        self._column_lineage_unresolved_table_identifier = sql.Identifier(
+            *(part.lower() for part in qualified_unresolved_lineage_table.split("."))
         )
         qualified_property_table = DatabaseNaming(
             settings.schema, settings.table_prefix
@@ -916,20 +924,29 @@ class MetadataRepository:
     def find_column_lineage(self) -> list[ColumnLineage]:
         """Load all column lineage once for queries and static export."""
 
-        query = sql.SQL(
-            "SELECT lineage_id, target_object_id, target_column_name, "
+        resolved_query = sql.SQL(
+            "SELECT lineage_id, target_object_id, NULL AS target_qualified_name, "
+            "target_column_name, "
             "source_object_id, source_column_name, classification, expression, "
             "statement_sql, source_type, source_root, source_file, source_object, "
             "evidence, unresolved_reason FROM {} "
             "ORDER BY target_object_id, target_column_name, lineage_id"
         ).format(self._column_lineage_table_identifier)
-        try:
-            with self._connection.cursor() as cursor:
-                self._execute(cursor, query)
-                rows = cursor.fetchall()
-        except psycopg2.errors.UndefinedTable:
-            self._connection.rollback()
-            return []
+        unresolved_query = sql.SQL(
+            "SELECT lineage_id, NULL AS target_object_id, target_qualified_name, "
+            "target_column_name, source_object_id, source_column_name, "
+            "classification, expression, statement_sql, source_type, source_root, "
+            "source_file, source_object, evidence, unresolved_reason FROM {} "
+            "ORDER BY target_qualified_name, target_column_name, lineage_id"
+        ).format(self._column_lineage_unresolved_table_identifier)
+        rows: list[tuple[Any, ...]] = []
+        for query in (resolved_query, unresolved_query):
+            try:
+                with self._connection.cursor() as cursor:
+                    self._execute(cursor, query)
+                    rows.extend(cursor.fetchall())
+            except psycopg2.errors.UndefinedTable:
+                self._connection.rollback()
         return [_row_to_column_lineage(row) for row in rows]
 
     def create_column_lineage(
@@ -966,12 +983,17 @@ class MetadataRepository:
                     break
             return next(iter(matches.values())) if len(matches) == 1 else None
 
-        rows: list[tuple[object, ...]] = []
+        resolved_rows: list[tuple[object, ...]] = []
+        unresolved_rows: list[tuple[object, ...]] = []
         for _, candidate in candidates:
             target = resolve(
                 candidate.target_qualified_name, candidate.target_system_name
             )
-            if target is None:
+            if (
+                target is None
+                and candidate.classification
+                is not ColumnLineageClassification.UNRESOLVED
+            ):
                 continue
             source = resolve(
                 candidate.source_qualified_name, candidate.source_system_name
@@ -986,7 +1008,11 @@ class MetadataRepository:
                 (
                     str(source.object_id) if source else "",
                     candidate.source_column_name or "",
-                    str(target.object_id),
+                    (
+                        str(target.object_id)
+                        if target is not None
+                        else candidate.target_qualified_name.casefold()
+                    ),
                     candidate.target_column_name,
                     candidate.classification.value,
                     candidate.expression,
@@ -999,44 +1025,69 @@ class MetadataRepository:
                     candidate.unresolved_reason or "",
                 )
             )
-            rows.append(
-                (
-                    str(uuid5(_COLUMN_LINEAGE_NAMESPACE, stable_key)),
-                    str(target.object_id),
-                    candidate.target_column_name,
-                    str(source.object_id) if source else None,
-                    candidate.source_column_name,
-                    candidate.classification.value,
-                    candidate.expression,
-                    candidate.statement_sql,
-                    candidate.source_type,
-                    candidate.source_root,
-                    candidate.source_file,
-                    candidate.source_object,
-                    candidate.evidence,
-                    candidate.unresolved_reason,
-                )
+            lineage_id = str(uuid5(_COLUMN_LINEAGE_NAMESPACE, stable_key))
+            common_values = (
+                candidate.target_column_name,
+                str(source.object_id) if source else None,
+                candidate.source_column_name,
+                candidate.classification.value,
+                candidate.expression,
+                candidate.statement_sql,
+                candidate.source_type,
+                candidate.source_root,
+                candidate.source_file,
+                candidate.source_object,
+                candidate.evidence,
+                candidate.unresolved_reason,
             )
-        if not rows:
-            return 0
-        query = sql.SQL(
+            if target is None:
+                unresolved_rows.append(
+                    (
+                        lineage_id,
+                        candidate.target_qualified_name,
+                        *common_values,
+                    )
+                )
+            else:
+                resolved_rows.append(
+                    (
+                        lineage_id,
+                        str(target.object_id),
+                        *common_values,
+                    )
+                )
+        resolved_insert = sql.SQL(
             "INSERT INTO {} (lineage_id, target_object_id, target_column_name, "
             "source_object_id, source_column_name, classification, expression, "
             "statement_sql, source_type, source_root, source_file, source_object, "
             "evidence, unresolved_reason) VALUES %s ON CONFLICT DO NOTHING"
         ).format(self._column_lineage_table_identifier)
-        try:
-            with self._connection.cursor() as cursor:
-                self._execute_values(cursor, query, rows)
-                count = int(max(cursor.rowcount, 0))
-            self._connection.commit()
-        except psycopg2.errors.UndefinedTable:
-            self._connection.rollback()
-            return 0
-        except psycopg2.Error:
-            self._connection.rollback()
-            raise
-        return count
+        unresolved_insert = sql.SQL(
+            "INSERT INTO {} (lineage_id, target_qualified_name, "
+            "target_column_name, source_object_id, source_column_name, "
+            "classification, expression, statement_sql, source_type, source_root, "
+            "source_file, source_object, evidence, unresolved_reason) "
+            "VALUES %s ON CONFLICT DO NOTHING"
+        ).format(self._column_lineage_unresolved_table_identifier)
+
+        inserted = 0
+        for query, rows in (
+            (resolved_insert, resolved_rows),
+            (unresolved_insert, unresolved_rows),
+        ):
+            if not rows:
+                continue
+            try:
+                with self._connection.cursor() as cursor:
+                    self._execute_values(cursor, query, rows)
+                    inserted += int(max(cursor.rowcount, 0))
+                self._connection.commit()
+            except psycopg2.errors.UndefinedTable:
+                self._connection.rollback()
+            except psycopg2.Error:
+                self._connection.rollback()
+                raise
+        return inserted
 
     def create_relation(self, relation: Relation) -> Relation:
         """Insert one resolved relation; duplicate graph edges are harmless."""

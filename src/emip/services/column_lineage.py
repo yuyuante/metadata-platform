@@ -269,6 +269,7 @@ class ColumnLineageAnalyzer:
             owner,
             owner.qualified_name,
             owner.system_name,
+            owner,
             target_columns,
             projections,
             query,
@@ -338,6 +339,7 @@ class ColumnLineageAnalyzer:
             owner,
             durable_target,
             target_object.system_name,
+            target_object,
             target_columns,
             projections,
             query,
@@ -395,6 +397,7 @@ class ColumnLineageAnalyzer:
         owner: MetadataObject,
         target_name: str,
         target_system_name: str,
+        target_object: MetadataObject,
         target_columns: list[str],
         projections: list[exp.Expression],
         query: exp.Query,
@@ -406,10 +409,31 @@ class ColumnLineageAnalyzer:
         if scope is None:
             return []
         candidates: list[ColumnLineageCandidate] = []
+        available_target_columns = (
+            {column.column_name.casefold() for column in target_object.columns}
+            if target_object.columns
+            else None
+        )
         for target_column, projection in zip(target_columns, projections, strict=True):
             expression = (
                 projection.this if isinstance(projection, exp.Alias) else projection
             )
+            if (
+                available_target_columns is not None
+                and target_column.casefold() not in available_target_columns
+            ):
+                candidates.append(
+                    self._unresolved(
+                        owner,
+                        target_name,
+                        target_column,
+                        expression.sql(),
+                        statement_sql,
+                        sql_input,
+                        "TARGET_COLUMN_UNAVAILABLE",
+                    )
+                )
+                continue
             columns = list(expression.find_all(exp.Column))
             dependencies: list[tuple[MetadataObject, str]] = []
             unresolved = False

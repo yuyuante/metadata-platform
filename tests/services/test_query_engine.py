@@ -149,6 +149,7 @@ def test_column_lineage_returns_incoming_outgoing_and_evidence() -> None:
         source_object_id=source.object_id,
         source_column_name="source_id",
         target_object_id=target.object_id,
+        target_qualified_name=target.qualified_name,
         target_column_name="id",
         classification=ColumnLineageClassification.EXACT_DIRECT,
         expression="s.source_id",

@@ -29,6 +29,10 @@ source dependencies creates two evidence rows for the same target expression.
 
 Migration `007_create_emip_column_lineage.sql` adds `EMIP_COLUMN_LINEAGE`, distributed
 by target object ID with a distribution-safe primary key and source-object index.
+Migration `008_create_emip_column_lineage_unresolved.sql` adds a separate evidence
+table for unresolved target objects, distributed and keyed by lineage ID. It retains
+the unresolved qualified name without inventing a target object identity; exact rows
+still require a resolved target and remain in the resolved lineage table.
 Stable UUIDv5 keys use resolved object IDs plus column names and all provenance that
 distinguishes source occurrences; `ON CONFLICT DO NOTHING` makes repeated persistence
 idempotent. Candidate identity resolution performs one batched object/column load per
@@ -58,6 +62,11 @@ Examples:
 - Unresolved: an ambiguous unqualified column, unavailable qualified column metadata,
   unknown target object, projection-count mismatch, or unsafe star records
   `UNRESOLVED` with its reason and SQL evidence rather than a guessed exact edge.
+
+Explicit INSERT target columns are checked against loaded target-object metadata. A
+misspelled or absent column records `TARGET_COLUMN_UNAVAILABLE`, with its projection
+expression and enclosing statement preserved, and cannot become `EXACT_DIRECT` or
+`EXACT_EXPRESSION`.
 
 Object-level `READS`, `WRITES`, and `CALLS` extraction was not changed.
 
@@ -93,6 +102,11 @@ repeated persistence, and a single object load per persistence call. QueryEngine
 exposes incoming/outgoing dependencies, and the static exporter reads lineage once and
 adds both directions to object detail JSON.
 
+Review regressions additionally prove that invalid explicit target columns remain
+unresolved and that an unresolved target's qualified name, target column,
+classification, expression, statement SQL, source/evidence context, and reason survive
+the same detached round trip and can be queried without a fabricated object ID.
+
 ## Targeted production validation
 
 Validation was read-only and deliberately limited to named examples under
@@ -125,10 +139,9 @@ started.
 
 ## Quality gates
 
-Focused parser, analyzer, repository, persistence round-trip, query, migration, CLI,
-and web tests passed (`96 passed`), followed by the new specificity regression
-(`12 passed`). Ruff, Black check, and MyPy passed. The final full pytest run passed
-all `271` tests in 3.71 seconds.
+The review-focused analyzer, repository, migration, persistence round-trip, query, and
+web suite passed all `47` tests. Ruff, Black check, and MyPy passed. The final full
+pytest run passed all `275` tests in 3.52 seconds.
 
 ## Known limitations
 

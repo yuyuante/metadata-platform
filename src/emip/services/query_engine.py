@@ -260,7 +260,23 @@ class QueryEngine:
     def column_lineage(self, term: str) -> dict[str, object]:
         """Return persisted incoming and outgoing column dependencies."""
 
-        item = self.resolve(term)
+        resolution_error: ValueError | None = None
+        try:
+            item: MetadataObject | None = self.resolve(term)
+        except ValueError as error:
+            item = None
+            resolution_error = error
+        unresolved_incoming = [
+            lineage
+            for lineage in self._column_lineage
+            if lineage.target_object_id is None
+            and lineage.target_qualified_name is not None
+            and _identity(lineage.target_qualified_name) == _identity(term)
+        ]
+        if item is None and not unresolved_incoming:
+            if resolution_error is not None:
+                raise resolution_error
+            raise ValueError(f"Object not found: {term}")
 
         def serialize(lineage: ColumnLineage) -> dict[str, object]:
             source = (
@@ -268,7 +284,11 @@ class QueryEngine:
                 if lineage.source_object_id is not None
                 else None
             )
-            target = self._by_id.get(lineage.target_object_id)
+            target = (
+                self._by_id.get(lineage.target_object_id)
+                if lineage.target_object_id is not None
+                else None
+            )
             return {
                 "lineage_id": str(lineage.lineage_id),
                 "classification": lineage.classification.value,
@@ -281,9 +301,15 @@ class QueryEngine:
                     source.qualified_name if source is not None else None
                 ),
                 "source_column_name": lineage.source_column_name,
-                "target_object_id": str(lineage.target_object_id),
+                "target_object_id": (
+                    str(lineage.target_object_id)
+                    if lineage.target_object_id is not None
+                    else None
+                ),
                 "target_qualified_name": (
-                    target.qualified_name if target is not None else None
+                    target.qualified_name
+                    if target is not None
+                    else lineage.target_qualified_name
                 ),
                 "target_column_name": lineage.target_column_name,
                 "expression": lineage.expression,
@@ -299,15 +325,25 @@ class QueryEngine:
         incoming = [
             serialize(lineage)
             for lineage in self._column_lineage
-            if lineage.target_object_id == item.object_id
+            if item is not None and lineage.target_object_id == item.object_id
         ]
+        incoming.extend(serialize(lineage) for lineage in unresolved_incoming)
         outgoing = [
             serialize(lineage)
             for lineage in self._column_lineage
-            if lineage.source_object_id == item.object_id
+            if item is not None and lineage.source_object_id == item.object_id
         ]
+        object_result: dict[str, object]
+        if item is not None:
+            object_result = _object_dict(item)
+        else:
+            object_result = {
+                "qualified_name": unresolved_incoming[0].target_qualified_name,
+                "object_id": None,
+                "resolved": False,
+            }
         return {
-            "object": _object_dict(item),
+            "object": object_result,
             "incoming": incoming,
             "outgoing": outgoing,
         }

@@ -128,6 +128,29 @@ def test_qualified_column_requires_catalog_column_metadata() -> None:
     assert values[0].unresolved_reason == "SOURCE_COLUMN_AMBIGUOUS_OR_UNAVAILABLE"
 
 
+def test_explicit_target_column_requires_loaded_target_metadata() -> None:
+    source = _table("dbo.source_table", "source_id")
+    target = _table("dbo.target_table", "id")
+
+    values = _analyze(
+        _sql_owner(
+            "INSERT INTO dbo.target_table (idd) "
+            "SELECT s.source_id FROM dbo.source_table AS s"
+        ),
+        source,
+        target,
+    )
+
+    assert len(values) == 1
+    assert values[0].classification is ColumnLineageClassification.UNRESOLVED
+    assert values[0].target_column_name == "idd"
+    assert values[0].expression == "s.source_id"
+    assert values[0].unresolved_reason == "TARGET_COLUMN_UNAVAILABLE"
+    assert "INSERT INTO dbo.target_table" in values[0].statement_sql
+    assert '"context": "dbo.load_target"' in values[0].evidence
+    assert "dbo.target_table (idd)" in values[0].evidence
+
+
 def test_expression_records_every_source_dependency() -> None:
     left = _table("dbo.left_source", "amount")
     right = _table("dbo.right_source", "tax")
