@@ -462,6 +462,16 @@ def test_dynamic_parse_is_repeatable(tmp_path: Path) -> None:
         ("EXECUTE dbo.RefreshInventory;", "dbo.RefreshInventory"),
         ("EXEC proc_gen_F29;", "proc_gen_F29"),
         ("EXECUTE proc_gen_F29;", "proc_gen_F29"),
+        (
+            "EXEC dbo.RefreshInventory @warehouse_id = 10;",
+            "dbo.RefreshInventory",
+        ),
+        ("EXECUTE dbo.RefreshInventory @warehouse_id;", "dbo.RefreshInventory"),
+        ("EXEC proc_gen_F29 '20260828';", "proc_gen_F29"),
+        (
+            "EXECUTE proc_gen_F29 @warehouse_id = @runtime_warehouse, '20260828';",
+            "proc_gen_F29",
+        ),
     ],
 )
 def test_static_procedure_calls_keep_calls_lineage_without_dynamic_properties(

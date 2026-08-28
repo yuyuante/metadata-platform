@@ -81,9 +81,17 @@ class DynamicSqlResolver:
     """Resolve only source-proven literals and constant-variable expressions."""
 
     _EXEC = re.compile(r"\b(?:sp_executesql|EXEC(?:UTE)?)\b", re.I)
-    _CALLABLE_IDENTIFIER = re.compile(
-        r"^(?:\[[^]]+\]|\"[^\"]+\"|[A-Za-z_#][\w$#@]*)"
-        r"(?:\s*\.\s*(?:\[[^]]+\]|\"[^\"]+\"|[A-Za-z_#][\w$#@]*)){0,2}$"
+    _CALLABLE_PREFIX = re.compile(
+        r"(?P<callable>(?:\[[^]]+\]|\"[^\"]+\"|[A-Za-z_#][\w$#@]*)"
+        r"(?:\s*\.\s*(?:\[[^]]+\]|\"[^\"]+\"|[A-Za-z_#][\w$#@]*)){0,2})"
+        r"(?=\s|$)"
+    )
+    _PROCEDURE_ARGUMENT = re.compile(
+        r"(?:@[A-Za-z_]\w*\s*=\s*)?"
+        r"(?:@[A-Za-z_]\w*|(?:N|E)?'(?:''|[^'])*'|"
+        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)|0x[0-9A-F]+|NULL|DEFAULT)"
+        r"(?:\s+(?:OUT|OUTPUT))?",
+        re.I,
     )
     _ASSIGN = re.compile(
         r"^\s*(?:(?:SET|SELECT)\s+)?(?P<name>@?[A-Za-z_]\w*)\s*:?=\s*(?P<expr>.+?)\s*$",
@@ -250,9 +258,17 @@ class DynamicSqlResolver:
         if construct not in {"EXEC", "EXECUTE"}:
             return False
         target = expression.strip().rstrip(";").strip()
-        if not self._CALLABLE_IDENTIFIER.fullmatch(target):
+        match = self._CALLABLE_PREFIX.match(target)
+        if match is None:
             return False
-        return target.lstrip("@").lower() not in assigned_names
+        callable_name = match.group("callable")
+        if callable_name.lstrip("@").lower() in assigned_names:
+            return False
+        arguments = target[match.end() :].strip()
+        return not arguments or all(
+            self._PROCEDURE_ARGUMENT.fullmatch(argument.strip())
+            for argument in _split_arguments(arguments)
+        )
 
     def _statements(self, source: str) -> list[tuple[int, str, str]]:
         result: list[tuple[int, str, str]] = []
@@ -443,6 +459,29 @@ def _split_concat(expression: str) -> list[str]:
     if parts:
         parts.append(expression[start:])
     return parts
+
+
+def _split_arguments(arguments: str) -> list[str]:
+    result: list[str] = []
+    start = 0
+    quote: str | None = None
+    index = 0
+    while index < len(arguments):
+        char = arguments[index]
+        if quote:
+            if char == quote:
+                if index + 1 < len(arguments) and arguments[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+        elif char == "'":
+            quote = char
+        elif char == ",":
+            result.append(arguments[start:index])
+            start = index + 1
+        index += 1
+    result.append(arguments[start:])
+    return result
 
 
 def _mask_comments(source: str) -> str:

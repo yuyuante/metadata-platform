@@ -68,6 +68,10 @@ def test_static_sql_is_distinct_and_comments_or_literals_do_not_trigger() -> Non
         "EXECUTE dbo.RefreshInventory;",
         "EXEC proc_gen_F29;",
         "EXECUTE proc_gen_F29;",
+        "EXEC dbo.RefreshInventory @warehouse_id = 10;",
+        "EXECUTE dbo.RefreshInventory @warehouse_id;",
+        "EXEC proc_gen_F29 '20260828';",
+        "EXECUTE proc_gen_F29 @warehouse_id = @runtime_warehouse, '20260828';",
     ],
 )
 def test_static_procedure_calls_are_not_dynamic_sql(source: str) -> None:
