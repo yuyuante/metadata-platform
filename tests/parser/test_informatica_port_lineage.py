@@ -55,6 +55,55 @@ def _connector(source: str, field: str, target: str, target_field: str) -> str:
     )
 
 
+def _session(
+    name: str,
+    *,
+    source_connection: str | None = None,
+    target_connection: str | None = None,
+    lookup_connection: str | None = None,
+) -> str:
+    transformations = (
+        '<SESSTRANSFORMATIONINST TRANSFORMATIONTYPE="SOURCE DEFINITION" '
+        'SINSTANCENAME="SRC_I" />'
+        '<SESSTRANSFORMATIONINST TRANSFORMATIONTYPE="TARGET DEFINITION" '
+        'SINSTANCENAME="TGT_I" />'
+    )
+    extensions: list[str] = []
+    if source_connection:
+        extensions.extend(
+            (
+                '<SESSIONEXTENSION SINSTANCENAME="SRC_I" DSQINSTNAME="TR_I" />',
+                '<SESSIONEXTENSION SINSTANCENAME="TR_I">'
+                f'<CONNECTIONREFERENCE CONNECTIONNAME="{source_connection}" />'
+                "</SESSIONEXTENSION>",
+            )
+        )
+    if target_connection:
+        extensions.append(
+            '<SESSIONEXTENSION SINSTANCENAME="TGT_I">'
+            f'<CONNECTIONREFERENCE CONNECTIONNAME="{target_connection}" />'
+            "</SESSIONEXTENSION>"
+        )
+    if lookup_connection:
+        transformations += (
+            '<SESSTRANSFORMATIONINST TRANSFORMATIONTYPE="LOOKUP PROCEDURE" '
+            'SINSTANCENAME="TR_I" />'
+        )
+        extensions.append(
+            '<SESSIONEXTENSION SINSTANCENAME="TR_I">'
+            f'<CONNECTIONREFERENCE CONNECTIONNAME="{lookup_connection}" />'
+            "</SESSIONEXTENSION>"
+        )
+    return (
+        f'<SESSION NAME="{name}" MAPPINGNAME="M">'
+        f"{transformations}{''.join(extensions)}</SESSION>"
+    )
+
+
+def _workflow(*sessions: str) -> str:
+    return f'<WORKFLOW NAME="W">{"".join(sessions)}</WORKFLOW>'
+
+
 def _parse(tmp_path: Path, xml: str) -> tuple[MetadataObject, ...]:
     path = tmp_path / "mapping.xml"
     path.write_text(xml, encoding="utf-8")
@@ -363,6 +412,94 @@ def test_connection_provider_scopes_source_and_target_independently(
     assert candidate.classification is ColumnLineageClassification.EXACT_DIRECT
     assert candidate.source_system_name == "SRC_DB"
     assert candidate.target_system_name == "TGT_DB"
+
+
+def test_conflicting_source_connections_never_fall_back_to_global_identity(
+    tmp_path: Path,
+) -> None:
+    workflow = _workflow(
+        _session("S_A", source_connection="ODBC_SQL_SRC_DB_A"),
+        _session("S_B", source_connection="ODBC_SQL_SRC_DB_B"),
+    )
+    xml = _xml(
+        "Source Qualifier",
+        '<TRANSFORMFIELD NAME="A" PORTTYPE="INPUT/OUTPUT" />',
+        _connector("SRC_I", "A", "TR_I", "A") + _connector("TR_I", "A", "TGT_I", "X"),
+        workflow=workflow,
+    )
+
+    candidate = _candidates(_parse(tmp_path, xml))[0]
+
+    assert candidate.classification is ColumnLineageClassification.UNRESOLVED
+    assert candidate.unresolved_reason == "SOURCE_CONNECTION_AMBIGUOUS"
+    evidence = json.loads(candidate.evidence)
+    assert evidence["source_connection"] is None
+    assert evidence["source_connection_status"] == "AMBIGUOUS"
+
+
+def test_conflicting_target_connections_never_fall_back_to_global_identity(
+    tmp_path: Path,
+) -> None:
+    workflow = _workflow(
+        _session("S_A", target_connection="ODBC_SQL_TGT_DB_A"),
+        _session("S_B", target_connection="ODBC_SQL_TGT_DB_B"),
+    )
+    xml = _xml(
+        "Source Qualifier",
+        '<TRANSFORMFIELD NAME="A" PORTTYPE="INPUT/OUTPUT" />',
+        _connector("SRC_I", "A", "TR_I", "A") + _connector("TR_I", "A", "TGT_I", "X"),
+        workflow=workflow,
+    )
+
+    candidate = _candidates(_parse(tmp_path, xml))[0]
+
+    assert candidate.classification is ColumnLineageClassification.UNRESOLVED
+    assert candidate.unresolved_reason == "TARGET_CONNECTION_AMBIGUOUS"
+    evidence = json.loads(candidate.evidence)
+    assert evidence["target_connection"] is None
+    assert evidence["target_connection_status"] == "AMBIGUOUS"
+
+
+def test_unavailable_connections_keep_unique_global_identity_fallback(
+    tmp_path: Path,
+) -> None:
+    xml = _xml(
+        "Source Qualifier",
+        '<TRANSFORMFIELD NAME="A" PORTTYPE="INPUT/OUTPUT" />',
+        _connector("SRC_I", "A", "TR_I", "A") + _connector("TR_I", "A", "TGT_I", "X"),
+    )
+
+    candidate = _candidates(_parse(tmp_path, xml))[0]
+
+    assert candidate.classification is ColumnLineageClassification.EXACT_DIRECT
+    evidence = json.loads(candidate.evidence)
+    assert evidence["source_connection_status"] == "UNAVAILABLE"
+    assert evidence["target_connection_status"] == "UNAVAILABLE"
+
+
+def test_conflicting_lookup_connections_never_become_exact(
+    tmp_path: Path,
+) -> None:
+    workflow = _workflow(
+        _session("S_A", lookup_connection="ODBC_SQL_LOOKUP_DB_A"),
+        _session("S_B", lookup_connection="ODBC_SQL_LOOKUP_DB_B"),
+    )
+    xml = _xml(
+        "Lookup Procedure",
+        '<TRANSFORMFIELD NAME="IN_A" PORTTYPE="INPUT" />'
+        '<TRANSFORMFIELD NAME="OUT" PORTTYPE="OUTPUT" EXPRESSION="IN_A" />',
+        _connector("SRC_I", "A", "TR_I", "IN_A")
+        + _connector("TR_I", "OUT", "TGT_I", "X"),
+        workflow=workflow,
+    )
+
+    candidate = _candidates(_parse(tmp_path, xml))[0]
+
+    assert candidate.classification is ColumnLineageClassification.UNRESOLVED
+    assert candidate.unresolved_reason == "LOOKUP_CONNECTION_AMBIGUOUS"
+    evidence = json.loads(candidate.evidence)
+    assert evidence["lookup_connections"] == {"TR_I": None}
+    assert evidence["lookup_connection_statuses"] == {"TR_I": "AMBIGUOUS"}
 
 
 def test_hostile_expression_text_is_inert_and_unresolved(tmp_path: Path) -> None:

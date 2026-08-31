@@ -127,6 +127,7 @@ class InformaticaColumnLineageAnalyzer:
             target = (
                 resolve_definition(target_definition, target_connection)
                 if target_definition is not None
+                and target_connection_resolution.status != "AMBIGUOUS"
                 else None
             )
             target_column = _text(value.get("target_column")) or "?"
@@ -153,16 +154,36 @@ class InformaticaColumnLineageAnalyzer:
             source = (
                 resolve_definition(source_definition, source_connection)
                 if source_definition is not None
+                and source_connection_resolution.status != "AMBIGUOUS"
                 else None
             )
             source_column = _optional_text(value.get("source_column"))
+            lookup_resolutions = {
+                instance: connections.resolve(mapping, instance, ObjectType.LOOKUP)
+                for instance in _string_list(value.get("lookup_instances"))
+            }
             original_classification = _classification(value.get("classification"))
             unresolved_reason = _optional_text(value.get("unresolved_reason"))
             classification = original_classification
             if original_classification is ColumnLineageClassification.UNRESOLVED:
                 unresolved_reason = unresolved_reason or "PORT_LINEAGE_RECORD_INVALID"
             if classification is not ColumnLineageClassification.UNRESOLVED:
-                if target is None:
+                if target_connection_resolution.status == "AMBIGUOUS":
+                    classification = ColumnLineageClassification.UNRESOLVED
+                    unresolved_reason = "TARGET_CONNECTION_AMBIGUOUS"
+                elif (
+                    source_definition_name
+                    and source_connection_resolution.status == "AMBIGUOUS"
+                ):
+                    classification = ColumnLineageClassification.UNRESOLVED
+                    unresolved_reason = "SOURCE_CONNECTION_AMBIGUOUS"
+                elif any(
+                    resolution.status == "AMBIGUOUS"
+                    for resolution in lookup_resolutions.values()
+                ):
+                    classification = ColumnLineageClassification.UNRESOLVED
+                    unresolved_reason = "LOOKUP_CONNECTION_AMBIGUOUS"
+                elif target is None:
                     classification = ColumnLineageClassification.UNRESOLVED
                     unresolved_reason = "TARGET_OBJECT_UNRESOLVED"
                 elif not target.columns:
@@ -190,10 +211,6 @@ class InformaticaColumnLineageAnalyzer:
                 ):
                     classification = ColumnLineageClassification.UNRESOLVED
                     unresolved_reason = "SOURCE_DEPENDENCY_UNAVAILABLE"
-            lookup_resolutions = {
-                instance: connections.resolve(mapping, instance, ObjectType.LOOKUP)
-                for instance in _string_list(value.get("lookup_instances"))
-            }
             lookup_connections = {
                 instance: resolution.value
                 for instance, resolution in lookup_resolutions.items()

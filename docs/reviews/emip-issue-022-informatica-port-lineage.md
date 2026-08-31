@@ -32,6 +32,11 @@ catalog: the referenced source and target columns must exist. Unavailable catalo
 missing named columns produce distinct stable unresolved reasons. Object-level
 `READS`, `WRITES`, and `CALLS` behavior is unchanged.
 
+Connection status is also part of that proof. A completely unavailable connection may
+retain the existing globally unique physical-identity fallback. Conflicting connection
+evidence across executing sessions is different: ambiguous source, target, and Lookup
+contexts remain explicitly unresolved and never fall back to an unscoped catalog match.
+
 ## Persistence and query evidence
 
 Resolved and unresolved rows use the M014 tables and additive model unchanged. A
