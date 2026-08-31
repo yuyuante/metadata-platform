@@ -22,6 +22,9 @@ from emip.identity import (
     suffix_identity_keys,
 )
 from emip.services.column_lineage import ColumnLineageAnalyzer
+from emip.services.informatica_column_lineage import (
+    InformaticaColumnLineageAnalyzer,
+)
 
 _PHYSICAL_TYPES = frozenset(
     {ObjectType.TABLE, ObjectType.VIEW, ObjectType.MATERIALIZED_VIEW}
@@ -208,6 +211,17 @@ class MetadataIntegrationService:
         integrated = list(merged.values())
         persisted_physical = list(existing_physical_objects)
         links = self._add_cross_provider_links(integrated, persisted_physical)
+        physical_values = [
+            item
+            for item in persisted_physical + integrated
+            if item.object_type in _PHYSICAL_TYPES
+        ]
+        InformaticaColumnLineageAnalyzer().analyze(
+            integrated,
+            lambda definition, connection: self._resolve_definition_object(
+                definition, connection, physical_values
+            ),
+        )
         ColumnLineageAnalyzer().analyze(integrated, persisted_physical)
         findings = self._validate(integrated, persisted_physical)
         return IntegrationResult(
@@ -299,11 +313,31 @@ class MetadataIntegrationService:
                 relation_type,
                 "METADATA_INTEGRATION",
                 "provider identity resolution",
+                target.system_name,
             )
             if candidate not in definition.relation_candidates:
                 definition.relation_candidates += (candidate,)
                 created += 1
         return created
+
+    def _resolve_definition_object(
+        self,
+        definition: MetadataObject,
+        connection_name: str | None,
+        physical_objects: list[MetadataObject],
+    ) -> MetadataObject | None:
+        """Resolve one boundary once from the preloaded provider-aware catalog."""
+
+        definition_keys = self._definition_keys(definition)
+        matches: dict[str, MetadataObject] = {}
+        for target in physical_objects:
+            if connection_name and not _connection_matches_physical(
+                connection_name, target
+            ):
+                continue
+            if definition_keys & set(physical_identity_keys(target.qualified_name)):
+                matches[str(target.object_id)] = target
+        return next(iter(matches.values())) if len(matches) == 1 else None
 
     @staticmethod
     def _resolve_embedded_sql_links(

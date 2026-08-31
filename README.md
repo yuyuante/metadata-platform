@@ -311,7 +311,12 @@ metadata; it never queries a database per reference. Unqualified columns require
 unambiguous metadata owner, and `SELECT *` expands only from one source with complete,
 contiguously ordered columns. Exact reconstructed Dynamic SQL and exactly resolved
 Informatica embedded SQL reuse this analyzer. Possible/unresolved Dynamic SQL and
-Informatica transformation-port lineage remain outside this milestone.
+runtime-dependent Informatica SQL never creates exact lineage. PowerCenter 10.2
+mapping lineage additionally follows exact, mapping-scoped `CONNECTOR` paths from
+Source Definition fields through evidenced Source Qualifier, Expression, Lookup,
+Aggregator, Router, Filter, and Update Strategy ports to Target Definition fields.
+Internal ports remain evidence rather than fabricated physical objects; unsupported or
+ambiguous paths remain `UNRESOLVED`. See [Informatica metadata extraction](docs/emip/informatica.md).
 
 ### 6. Unsupported or invalid source / 不支援或無效的來源
 

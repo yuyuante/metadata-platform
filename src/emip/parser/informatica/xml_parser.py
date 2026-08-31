@@ -32,6 +32,12 @@ from emip.parser.informatica.parameters import (
     ParameterDiagnostic,
     ParameterFileCache,
 )
+from emip.parser.informatica.port_lineage import (
+    _PROPERTY_NAME as PORT_LINEAGE_PROPERTY,
+)
+from emip.parser.informatica.port_lineage import (
+    extract_mapping_port_lineage,
+)
 
 
 class InformaticaMetadataParser:
@@ -142,11 +148,15 @@ class InformaticaMetadataParser:
             result.append(
                 self._object(ObjectType.SESSION_CONFIG, folder_qn, config, "NAME")
             )
-        for source in _children(folder, "SOURCE"):
+        source_elements = tuple(_children(folder, "SOURCE"))
+        target_elements = tuple(_children(folder, "TARGET"))
+        sources = _unique_named_elements(source_elements)
+        targets = _unique_named_elements(target_elements)
+        for source in source_elements:
             result.append(
                 self._definition(folder_qn, source, ObjectType.SOURCE_DEFINITION)
             )
-        for target in _children(folder, "TARGET"):
+        for target in target_elements:
             result.append(
                 self._definition(folder_qn, target, ObjectType.TARGET_DEFINITION)
             )
@@ -174,7 +184,7 @@ class InformaticaMetadataParser:
             and _attr(item, "REFOBJECTNAME", "")
         }
         for mapping in mappings.values():
-            result.extend(self._mapping(folder_qn, mapping))
+            result.extend(self._mapping(folder_qn, mapping, sources, targets))
         for workflow in _children(folder, "WORKFLOW"):
             result.extend(
                 self._workflow(
@@ -625,12 +635,30 @@ class InformaticaMetadataParser:
             unresolved_status,
         )
 
-    def _mapping(self, folder_qn: str, mapping: ET.Element) -> list[MetadataObject]:
+    def _mapping(
+        self,
+        folder_qn: str,
+        mapping: ET.Element,
+        sources: dict[str, ET.Element],
+        targets: dict[str, ET.Element],
+    ) -> list[MetadataObject]:
         item = self._object(
             ObjectType.MAPPING,
             self._qn(folder_qn, _attr(mapping, "NAME", "UNKNOWN_MAPPING")),
             mapping,
             "NAME",
+        )
+        item.properties += (
+            ObjectProperty(
+                property_name=PORT_LINEAGE_PROPERTY,
+                property_value=extract_mapping_port_lineage(
+                    item.qualified_name,
+                    mapping,
+                    {name.casefold(): value for name, value in sources.items()},
+                    {name.casefold(): value for name, value in targets.items()},
+                    self._source_path,
+                ),
+            ),
         )
         result = [item]
         for instance in _children(mapping, "INSTANCE"):
@@ -787,6 +815,8 @@ class InformaticaMetadataParser:
 
 def _read_xml(path: Path) -> str:
     data = path.read_bytes()
+    if re.search(rb"<!DOCTYPE", data, re.I):
+        raise ET.ParseError("DOCTYPE declarations are not allowed")
     match = re.search(rb"encoding=['\"]([^'\"]+)['\"]", data[:256], re.I)
     encoding = match.group(1).decode("ascii") if match else "utf-8"
     return data.decode(encoding)
@@ -812,6 +842,25 @@ def _name(element: ET.Element) -> str:
 
 def _children(element: ET.Element, name: str) -> list[ET.Element]:
     return [child for child in list(element) if _name(child) == name]
+
+
+def _unique_named_elements(elements: tuple[ET.Element, ...]) -> dict[str, ET.Element]:
+    """Index exact folder definitions and withhold duplicate identities."""
+
+    result: dict[str, ET.Element] = {}
+    duplicates: set[str] = set()
+    for element in elements:
+        name = _attr(element, "NAME", "")
+        if not name:
+            continue
+        key = name.casefold()
+        if key in result:
+            duplicates.add(key)
+            continue
+        result[key] = element
+    for duplicate in duplicates:
+        result.pop(duplicate, None)
+    return result
 
 
 def _attr(element: ET.Element, name: str, default: str) -> str:

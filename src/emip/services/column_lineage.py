@@ -49,7 +49,9 @@ class ColumnLineageAnalyzer:
         current = list(objects)
         catalog = self._catalog([*existing_physical_objects, *current])
         for item in current:
-            candidates: list[ColumnLineageCandidate] = []
+            candidates: list[ColumnLineageCandidate] = list(
+                item.column_lineage_candidates
+            )
             for sql_input in self._sql_inputs(item):
                 for expression in self._parse_expressions(sql_input.sql):
                     candidates.extend(
