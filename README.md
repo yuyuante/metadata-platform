@@ -322,6 +322,11 @@ Source Definition fields through evidenced Source Qualifier, Expression, Lookup,
 Aggregator, Router, Filter, and Update Strategy ports to Target Definition fields.
 Internal ports remain evidence rather than fabricated physical objects; unsupported or
 ambiguous paths remain `UNRESOLVED`. See [Informatica metadata extraction](docs/emip/informatica.md).
+SQL query lineage also follows bounded, non-recursive CTE chains, derived tables,
+scalar subqueries, and positional `UNION` branches into physical sources. Query
+paths and branch evidence are retained; correlated predicates and `EXISTS` do not
+become value dependencies. Recursive CTEs, runtime procedural control flow, and
+unsupported dialect shapes fail closed for later review.
 
 ### 6. Unsupported or invalid source / 不支援或無效的來源
 
