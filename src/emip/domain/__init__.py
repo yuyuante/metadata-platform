@@ -2,6 +2,9 @@
 
 from .domain import (
     Column,
+    ColumnLineage,
+    ColumnLineageCandidate,
+    ColumnLineageClassification,
     ColumnRelation,
     DetectionMethod,
     ObjectProperty,
@@ -31,6 +34,9 @@ from .source_location import SourceLocation, SourceType
 
 __all__ = [
     "Column",
+    "ColumnLineage",
+    "ColumnLineageCandidate",
+    "ColumnLineageClassification",
     "ColumnRelation",
     "DetectionMethod",
     "MetadataObject",

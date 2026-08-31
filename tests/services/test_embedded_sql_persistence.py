@@ -2,8 +2,12 @@ import json
 from copy import deepcopy
 from pathlib import Path
 from typing import cast
+from uuid import UUID, uuid5
 
 from emip.domain import (
+    ColumnLineage,
+    ColumnLineageCandidate,
+    ColumnLineageClassification,
     MetadataObject,
     ObjectType,
     Relation,
@@ -24,6 +28,7 @@ class RoundTripRepository:
     def __init__(self) -> None:
         self.objects: list[MetadataObject] = []
         self.relations: list[Relation] = []
+        self.column_lineage: list[ColumnLineage] = []
 
     def prepare_persistence(self) -> int:
         return len(self.objects)
@@ -71,13 +76,72 @@ class RoundTripRepository:
     def find_relations(self) -> list[Relation]:
         return deepcopy(self.relations)
 
+    def create_column_lineage(
+        self, candidates: list[tuple[MetadataObject, ColumnLineageCandidate]]
+    ) -> int:
+        by_name = {item.qualified_name.casefold(): item for item in self.objects}
+        for _, candidate in candidates:
+            target = by_name.get(candidate.target_qualified_name.casefold())
+            source = (
+                by_name.get(candidate.source_qualified_name.casefold())
+                if candidate.source_qualified_name
+                else None
+            )
+            if (
+                target is None
+                and candidate.classification
+                is not ColumnLineageClassification.UNRESOLVED
+            ):
+                continue
+            lineage_id = uuid5(
+                UUID("997d0536-34c3-4df5-a5bd-88f8d05713f6"),
+                "|".join(
+                    (
+                        str(source.object_id) if source else "",
+                        candidate.source_column_name or "",
+                        (
+                            str(target.object_id)
+                            if target is not None
+                            else candidate.target_qualified_name.casefold()
+                        ),
+                        candidate.target_column_name,
+                        candidate.expression,
+                    )
+                ),
+            )
+            if any(value.lineage_id == lineage_id for value in self.column_lineage):
+                continue
+            self.column_lineage.append(
+                ColumnLineage(
+                    lineage_id=lineage_id,
+                    target_object_id=target.object_id if target else None,
+                    target_qualified_name=candidate.target_qualified_name,
+                    target_column_name=candidate.target_column_name,
+                    classification=candidate.classification,
+                    expression=candidate.expression,
+                    statement_sql=candidate.statement_sql,
+                    source_type=candidate.source_type,
+                    source_root=candidate.source_root,
+                    source_file=candidate.source_file,
+                    source_object=candidate.source_object,
+                    evidence=candidate.evidence,
+                    source_object_id=source.object_id if source else None,
+                    source_column_name=candidate.source_column_name,
+                    unresolved_reason=candidate.unresolved_reason,
+                )
+            )
+        return len(self.column_lineage)
+
+    def find_column_lineage(self) -> list[ColumnLineage]:
+        return deepcopy(self.column_lineage)
+
 
 def test_dynamic_sql_evidence_and_exact_lineage_survive_persistence_reload(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "warehouse.sql"
     path.write_text(
-        "CREATE PROCEDURE sales.refresh AS " "EXEC('SELECT * FROM sales.customer');",
+        "CREATE PROCEDURE sales.refresh AS EXEC('SELECT * FROM sales.customer');",
         encoding="utf-8",
     )
     procedure = SqlDdlParser().parse(path)[0]
@@ -102,6 +166,90 @@ def test_dynamic_sql_evidence_and_exact_lineage_survive_persistence_reload(
         item["qualified_name"] == "sales.customer"
         for item in reloaded.depends("sales.refresh")
     )
+
+
+def test_column_lineage_parser_integration_persistence_reload_query_round_trip(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "column-lineage.sql"
+    path.write_text(
+        "CREATE TABLE dbo.source_table (source_id integer, amount numeric);\n"
+        "CREATE TABLE dbo.target_table (id integer, doubled numeric);\n"
+        "CREATE PROCEDURE dbo.load_target AS $$ BEGIN\n"
+        "INSERT INTO dbo.target_table (id, doubled)\n"
+        "SELECT s.source_id, s.amount * 2 FROM dbo.source_table s;\n"
+        "END $$ LANGUAGE plpgsql;\n",
+        encoding="utf-8",
+    )
+    parsed = SqlDdlParser().parse(path)
+    integrated = MetadataIntegrationService().integrate(parsed)
+    repository = RoundTripRepository()
+
+    persisted = MetadataObjectPersister(cast(MetadataRepository, repository)).persist(
+        integrated.objects
+    )
+    detached = QueryEngine(cast(QueryRepository, repository)).column_lineage(
+        "dbo.target_table"
+    )
+
+    assert persisted.objects_created == 3
+    incoming = detached["incoming"]
+    assert isinstance(incoming, list)
+    assert [
+        (value["target_column_name"], value["classification"]) for value in incoming
+    ] == [
+        ("id", "EXACT_DIRECT"),
+        ("doubled", "EXACT_EXPRESSION"),
+    ]
+    assert {value["source_qualified_name"] for value in incoming} == {
+        "dbo.source_table"
+    }
+    assert all(value["statement_sql"] for value in incoming)
+    assert all(value["evidence"] for value in incoming)
+
+
+def test_unresolved_target_lineage_survives_detached_reload_and_query(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unresolved-column-lineage.sql"
+    path.write_text(
+        "CREATE TABLE dbo.source_table (source_id integer);\n"
+        "CREATE PROCEDURE dbo.load_missing AS $$ BEGIN\n"
+        "INSERT INTO missing_schema.missing_target (target_id)\n"
+        "SELECT s.source_id FROM dbo.source_table s;\n"
+        "END $$ LANGUAGE plpgsql;\n",
+        encoding="utf-8",
+    )
+    parsed = SqlDdlParser().parse(path)
+    integrated = MetadataIntegrationService().integrate(parsed)
+    repository = RoundTripRepository()
+
+    MetadataObjectPersister(cast(MetadataRepository, repository)).persist(
+        integrated.objects
+    )
+    detached = QueryEngine(cast(QueryRepository, repository)).column_lineage(
+        "missing_schema.missing_target"
+    )
+
+    assert detached["object"] == {
+        "qualified_name": "missing_schema.missing_target",
+        "object_id": None,
+        "resolved": False,
+    }
+    incoming = detached["incoming"]
+    assert isinstance(incoming, list)
+    assert len(incoming) == 1
+    assert incoming[0]["target_object_id"] is None
+    assert incoming[0]["target_qualified_name"] == ("missing_schema.missing_target")
+    assert incoming[0]["target_column_name"] == "target_id"
+    assert incoming[0]["classification"] == "UNRESOLVED"
+    assert incoming[0]["expression"] == (
+        "SELECT s.source_id FROM dbo.source_table AS s"
+    )
+    assert "INSERT INTO missing_schema.missing_target" in incoming[0]["statement_sql"]
+    assert incoming[0]["source_object"] == "dbo.load_missing"
+    assert "missing_schema.missing_target" in incoming[0]["evidence"]
+    assert incoming[0]["unresolved_reason"] == "TARGET_OBJECT_UNRESOLVED"
 
 
 def test_embedded_sql_lineage_survives_persistence_reload_and_query(

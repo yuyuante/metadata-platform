@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING, Self
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
-    from .domain import Column, ObjectProperty, RelationCandidate
+    from .domain import (
+        Column,
+        ColumnLineageCandidate,
+        ObjectProperty,
+        RelationCandidate,
+    )
     from .source_location import SourceLocation
 
 
@@ -78,6 +83,7 @@ class MetadataObject:
     columns: tuple[Column, ...] = ()
     properties: tuple[ObjectProperty, ...] = ()
     relation_candidates: tuple[RelationCandidate, ...] = ()
+    column_lineage_candidates: tuple[ColumnLineageCandidate, ...] = ()
     source_locations: tuple[SourceLocation, ...] = ()
 
     def __post_init__(self) -> None:
@@ -106,6 +112,7 @@ class MetadataObject:
         columns: tuple[Column, ...] = (),
         properties: tuple[ObjectProperty, ...] = (),
         relation_candidates: tuple[RelationCandidate, ...] = (),
+        column_lineage_candidates: tuple[ColumnLineageCandidate, ...] = (),
         source_locations: tuple[SourceLocation, ...] = (),
     ) -> Self:
         """Create a metadata object with generated identity and timestamps."""
@@ -125,6 +132,7 @@ class MetadataObject:
             columns=columns,
             properties=properties,
             relation_candidates=relation_candidates,
+            column_lineage_candidates=column_lineage_candidates,
             source_locations=source_locations,
         )
 

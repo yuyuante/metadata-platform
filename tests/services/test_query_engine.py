@@ -1,4 +1,6 @@
 from emip.domain import (
+    ColumnLineage,
+    ColumnLineageClassification,
     MetadataObject,
     ObjectProperty,
     ObjectType,
@@ -12,16 +14,23 @@ from emip.services.query_engine import QueryEngine, tree_lines
 
 class FakeRepository:
     def __init__(
-        self, objects: list[MetadataObject], relations: list[Relation]
+        self,
+        objects: list[MetadataObject],
+        relations: list[Relation],
+        column_lineage: list[ColumnLineage] | None = None,
     ) -> None:
         self.objects = objects
         self.relations = relations
+        self.column_lineage = column_lineage or []
 
     def find_objects(self) -> list[MetadataObject]:
         return self.objects
 
     def find_relations(self) -> list[Relation]:
         return self.relations
+
+    def find_column_lineage(self) -> list[ColumnLineage]:
+        return self.column_lineage
 
 
 def _object(kind: ObjectType, qualified_name: str, name: str) -> MetadataObject:
@@ -130,6 +139,35 @@ def test_flow_and_source_resolve_stable_object_id(tmp_path) -> None:
     assert flow["root"]["id"] == str(customer.object_id)  # type: ignore[index]
     assert str(objects["view"].object_id) in flow["downstream"]  # type: ignore[operator]
     assert traceability["locations"][0]["excerpt"] == "CREATE TABLE customer;"  # type: ignore[index]
+
+
+def test_column_lineage_returns_incoming_outgoing_and_evidence() -> None:
+    source = _object(ObjectType.TABLE, "dbo.source", "source")
+    target = _object(ObjectType.TABLE, "dbo.target", "target")
+    lineage = ColumnLineage(
+        lineage_id=source.object_id,
+        source_object_id=source.object_id,
+        source_column_name="source_id",
+        target_object_id=target.object_id,
+        target_qualified_name=target.qualified_name,
+        target_column_name="id",
+        classification=ColumnLineageClassification.EXACT_DIRECT,
+        expression="s.source_id",
+        statement_sql="INSERT INTO dbo.target (id) SELECT source_id FROM dbo.source s",
+        source_type="STATIC_SQL",
+        source_root="sql",
+        source_file="load.sql",
+        source_object="dbo.load",
+        evidence='{"query":"SELECT source_id FROM dbo.source s"}',
+    )
+    engine = QueryEngine(FakeRepository([source, target], [], [lineage]))
+
+    incoming = engine.column_lineage("dbo.target")
+    outgoing = engine.column_lineage("dbo.source")
+
+    assert incoming["incoming"][0]["source_qualified_name"] == "dbo.source"  # type: ignore[index]
+    assert incoming["incoming"][0]["evidence"] == lineage.evidence  # type: ignore[index]
+    assert outgoing["outgoing"][0]["target_qualified_name"] == "dbo.target"  # type: ignore[index]
 
 
 def test_workflow_impact_dependencies_and_reverse_dependencies() -> None:

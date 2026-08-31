@@ -199,7 +199,7 @@ def run_scan(
     print(f"Objects skipped  : {persistence_result.objects_skipped}")
     print(f"Objects failed   : {persistence_result.objects_failed}")
     print(f"Objects merged   : {integration_result.objects_merged}")
-    print("Cross-provider links: " f"{integration_result.cross_provider_links_created}")
+    print(f"Cross-provider links: {integration_result.cross_provider_links_created}")
     print("Repository failure classification:")
     if persistence_result.failure_categories:
         for category, count in sorted(
@@ -274,6 +274,9 @@ def _build_parser() -> argparse.ArgumentParser:
     source_parser = query_commands.add_parser("source")
     source_parser.add_argument("term")
     add_json_option(source_parser)
+    column_lineage_parser = query_commands.add_parser("column-lineage")
+    column_lineage_parser.add_argument("term")
+    add_json_option(column_lineage_parser)
     web_parser = subparsers.add_parser("web")
     web_commands = web_parser.add_subparsers(dest="web_command", required=True)
     export_parser = web_commands.add_parser("export")
@@ -313,6 +316,9 @@ def _print_query_result(result: object, as_json: bool) -> None:
         return
     if isinstance(result, dict) and "locations" in result:
         _print_source_result(result)
+        return
+    if isinstance(result, dict) and {"incoming", "outgoing"} <= result.keys():
+        _print_column_lineage_result(result)
         return
     if isinstance(result, list):
         for item in result:
@@ -408,6 +414,30 @@ def _print_source_result(result: dict[object, object]) -> None:
             print("---")
 
 
+def _print_column_lineage_result(result: dict[object, object]) -> None:
+    item = result.get("object")
+    if isinstance(item, dict):
+        print(f"Column Lineage: {item.get('qualified_name')}")
+    for label, key in (("Incoming", "incoming"), ("Outgoing", "outgoing")):
+        print(f"{label}:")
+        values = result.get(key)
+        if not isinstance(values, list) or not values:
+            print("  None")
+            continue
+        for value in values:
+            if not isinstance(value, dict):
+                continue
+            source = value.get("source_qualified_name") or "<none>"
+            source_column = value.get("source_column_name") or "<none>"
+            target = value.get("target_qualified_name") or "<unknown>"
+            target_column = value.get("target_column_name") or "<unknown>"
+            classification = value.get("classification") or ""
+            print(
+                f"  {source}.{source_column} -> {target}.{target_column} "
+                f"[{classification}]"
+            )
+
+
 def run_query(args: argparse.Namespace) -> int:
     """Execute one query without scanning or parsing source files."""
 
@@ -441,6 +471,8 @@ def run_query(args: argparse.Namespace) -> int:
             result = engine.flow(args.term, args.depth)
         elif command == "source":
             result = engine.source(args.term)
+        elif command == "column-lineage":
+            result = engine.column_lineage(args.term)
         else:
             print(f"Unsupported query: {command}")
             return 1

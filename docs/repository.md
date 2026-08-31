@@ -63,3 +63,35 @@ All EMIP tables must begin with `EMIP_`. Constraint names use the `EMIP_PK_` or 
 | `IS_UNIQUE` | `BOOLEAN` | No | Unique-constraint participation flag. |
 
 The table uses `EMIP_PK_COLUMN`, `EMIP_UK_COLUMN`, and `EMIP_IDX_COLUMN_OBJECT`. Object and column rows are persisted in the same repository transaction. The repository remains readable before this migration is applied and returns no columns until the table exists.
+
+## EMIP_COLUMN_LINEAGE
+
+`EMIP_COLUMN_LINEAGE` is the additive column-dependency store introduced by
+`scripts/sql/007_create_emip_column_lineage.sql`. Its deterministic UUID is derived
+from resolved source/target object identities, column names, classification, SQL,
+source context, and evidence, so repeated persistence is idempotent without relying
+on replaceable `EMIP_COLUMN.COLUMN_ID` values. Unresolved rows retain a nullable
+source object/column and a durable reason. The table is distributed by
+`TARGET_OBJECT_ID`; its primary key includes that distribution key, and a source
+object index supports reverse lookup.
+
+Repository reads remain backward compatible when the additive table is absent.
+Persistence resolves all candidate identities from one batched object load per call,
+preloads existing stable lineage IDs with one candidate-bounded `ANY(uuid[])` query
+per populated lineage table, and bulk-inserts only missing rows. This preserves
+idempotency without PostgreSQL 9.5 `ON CONFLICT` syntax or per-row queries/inserts.
+Query/static-web consumers load lineage once rather than querying per column.
+
+## EMIP_COLUMN_LINEAGE_UNRESOLVED
+
+`EMIP_COLUMN_LINEAGE_UNRESOLVED` is the additive evidence store introduced by
+`scripts/sql/008_create_emip_column_lineage_unresolved.sql` for findings whose target
+object cannot be resolved. It deliberately stores `TARGET_QUALIFIED_NAME` instead of
+fabricating a target object UUID. The row retains target-column text, classification,
+expression and statement SQL, source context, evidence, and the unresolved reason.
+
+The table is distributed by `LINEAGE_ID`, which is also its primary key, so the schema
+is safe for Greenplum's distribution-key constraints. Resolved-target rows continue to
+use `EMIP_COLUMN_LINEAGE`; exact lineage is never written to the unresolved-target
+table. Repository reads tolerate either additive lineage table being absent, allowing
+the migration to be deployed independently and preserving backward compatibility.

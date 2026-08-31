@@ -21,6 +21,7 @@ from emip.identity import (
     physical_identity_keys,
     suffix_identity_keys,
 )
+from emip.services.column_lineage import ColumnLineageAnalyzer
 
 _PHYSICAL_TYPES = frozenset(
     {ObjectType.TABLE, ObjectType.VIEW, ObjectType.MATERIALIZED_VIEW}
@@ -193,6 +194,11 @@ class MetadataIntegrationService:
             existing.relation_candidates = tuple(
                 dict.fromkeys(existing.relation_candidates + item.relation_candidates)
             )
+            existing.column_lineage_candidates = tuple(
+                dict.fromkeys(
+                    existing.column_lineage_candidates + item.column_lineage_candidates
+                )
+            )
             if not existing.columns and item.columns:
                 existing.columns = item.columns
             if not existing.properties and item.properties:
@@ -202,6 +208,7 @@ class MetadataIntegrationService:
         integrated = list(merged.values())
         persisted_physical = list(existing_physical_objects)
         links = self._add_cross_provider_links(integrated, persisted_physical)
+        ColumnLineageAnalyzer().analyze(integrated, persisted_physical)
         findings = self._validate(integrated, persisted_physical)
         return IntegrationResult(
             objects=tuple(integrated),

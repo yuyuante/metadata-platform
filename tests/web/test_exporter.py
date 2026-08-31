@@ -8,6 +8,8 @@ from uuid import UUID
 import pytest
 
 from emip.domain import (
+    ColumnLineage,
+    ColumnLineageClassification,
     MetadataObject,
     ObjectProperty,
     ObjectType,
@@ -21,12 +23,17 @@ from emip.web import StaticWebExporter
 
 class CountingRepository:
     def __init__(
-        self, objects: list[MetadataObject], relations: list[Relation]
+        self,
+        objects: list[MetadataObject],
+        relations: list[Relation],
+        column_lineage: list[ColumnLineage] | None = None,
     ) -> None:
         self.objects = objects
         self.relations = relations
+        self.column_lineage = column_lineage or []
         self.object_reads = 0
         self.relation_reads = 0
+        self.column_lineage_reads = 0
 
     def find_objects(self) -> list[MetadataObject]:
         self.object_reads += 1
@@ -35,6 +42,10 @@ class CountingRepository:
     def find_relations(self) -> list[Relation]:
         self.relation_reads += 1
         return list(self.relations)
+
+    def find_column_lineage(self) -> list[ColumnLineage]:
+        self.column_lineage_reads += 1
+        return list(self.column_lineage)
 
 
 def _object(
@@ -106,6 +117,24 @@ def test_export_is_partitioned_deterministic_and_reads_repository_once(
         "AI7101B::wf_AI7101B",
         provider="INFORMATICA",
     )
+    column_lineage = [
+        ColumnLineage(
+            lineage_id=UUID("00000000-0000-0000-0000-000000000004"),
+            source_object_id=source.object_id,
+            source_column_name="STK_ID",
+            target_object_id=table.object_id,
+            target_qualified_name=table.qualified_name,
+            target_column_name="STK_ID",
+            classification=ColumnLineageClassification.EXACT_DIRECT,
+            expression="s.STK_ID",
+            statement_sql="INSERT INTO dbo.STKOUT (STK_ID) SELECT s.STK_ID",
+            source_type="INFORMATICA_EMBEDDED_SQL",
+            source_root="xml",
+            source_file="workflow.xml",
+            source_object=source.qualified_name,
+            evidence='{"context":"SQ"}',
+        )
+    ]
     repository = CountingRepository(
         [workflow, source, table],
         [
@@ -120,17 +149,21 @@ def test_export_is_partitioned_deterministic_and_reads_repository_once(
                 relation_type=RelationType.EXECUTES,
             ),
         ],
+        column_lineage,
     )
     first_output = tmp_path / "first"
     second_output = tmp_path / "second"
 
     statistics = StaticWebExporter(repository).export(first_output, depth=4)
     StaticWebExporter(
-        CountingRepository([table, source, workflow], repository.relations)
+        CountingRepository(
+            [table, source, workflow], repository.relations, column_lineage
+        )
     ).export(second_output, depth=4)
 
     assert repository.object_reads == 1
     assert repository.relation_reads == 1
+    assert repository.column_lineage_reads == 1
     assert statistics.object_count == 3
     assert statistics.detail_count == 3
     assert statistics.flow_count == 3
@@ -167,6 +200,10 @@ def test_export_is_partitioned_deterministic_and_reads_repository_once(
         assert (first_output / detail_path).is_file()
         assert (first_output / flow_path).is_file()
     table_flow = _read_json(first_output / "data" / "flows" / f"{table_id}.json")
+    table_detail = _read_json(first_output / "data" / "objects" / f"{table_id}.json")
+    assert table_detail["column_lineage"]["incoming"][0]["source_column_name"] == (  # type: ignore[index]
+        "STK_ID"
+    )
     downstream = table_flow["downstream"]
     assert isinstance(downstream, list)
     assert source_id in downstream

@@ -61,7 +61,9 @@ name remain separate and are identified by qualified name, object type,
 provider, and stable repository UUID.
 
 Each detail file contains the public metadata DTO, properties, columns, source
-locations/excerpts, direct dependencies, and direct used-by entries. It does
+locations/excerpts, direct dependencies, direct used-by entries, and incoming/outgoing
+column lineage. The exporter loads the column-lineage dataset once and partitions it
+in memory; it does
 not expose repository rows or credentials. Missing or unreadable source files
 produce an explicit warning. Source text is inserted into the page with
 `textContent`; SQL or XML markup is never interpreted as HTML.

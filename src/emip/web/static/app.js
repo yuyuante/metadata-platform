@@ -97,10 +97,17 @@ function relationList(title, items) {
   if(!items.length) list.append(text("li","None","empty")); section.append(list); return section;
 }
 
+function columnLineageList(title, items) {
+  const section=document.createElement("section"); section.append(text("h3",title)); const list=document.createElement("ul"); list.className="link-list";
+  for(const item of items) { const li=document.createElement("li"); const source=`${item.source_qualified_name||"<none>"}.${item.source_column_name||"<none>"}`; const target=`${item.target_qualified_name}.${item.target_column_name}`; li.append(text("span",`${source} → ${target} [${item.classification}]`)); if(item.expression) li.append(text("div",item.expression,"meta")); if(item.unresolved_reason) li.append(text("div",item.unresolved_reason,"warnings")); list.append(li); }
+  if(!items.length) list.append(text("li","None","empty")); section.append(list); return section;
+}
+
 function renderDetail(detail) {
   const host=el("detail"); clear(host); const object=detail.object; host.append(text("h2",object.qualified_name)); host.append(facts(object));
   if(object.description) host.append(text("p",object.description));
   host.append(relationList("Dependencies",detail.dependencies)); host.append(relationList("Used by",detail.used_by));
+  const columnLineage=detail.column_lineage||{incoming:[],outgoing:[]}; host.append(columnLineageList("Incoming column lineage",columnLineage.incoming||[])); host.append(columnLineageList("Outgoing column lineage",columnLineage.outgoing||[]));
   const locations=detail.source.locations; host.append(text("h3","Source context"));
   for(const location of locations) { const card=document.createElement("article"); card.className="source-card"; card.append(text("div",`${location.source_type} · ${location.source_file}`,"source-meta")); const line=location.start_line ? `Lines ${location.start_line}–${location.end_line||location.start_line}` : "Line range unavailable"; card.append(text("div",`${line}${location.context_identifier ? ` · ${location.context_identifier}` : ""}`,"source-meta")); if(location.warning) card.append(text("p",location.warning,"warnings")); if(location.excerpt) card.append(text("pre",location.excerpt)); host.append(card); }
   if(!locations.length) host.append(text("p","No persisted source locations.","empty"));
