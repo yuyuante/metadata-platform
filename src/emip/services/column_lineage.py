@@ -804,9 +804,11 @@ class ColumnLineageAnalyzer:
                     "SELECT_STAR_METADATA_UNAVAILABLE",
                 )
             ]
+        resolver = QueryLineageResolver(cast(exp.Expression, query), catalog)
+        outputs = resolver.outputs(query)
         if not target_columns:
-            target_columns = [projection.alias_or_name for projection in projections]
-        if len(target_columns) != len(projections) or any(
+            target_columns = [output.name for output in outputs]
+        if len(target_columns) != len(outputs) or any(
             not name for name in target_columns
         ):
             return [
@@ -841,6 +843,7 @@ class ColumnLineageAnalyzer:
             create.sql(),
             sql_input,
             catalog,
+            resolver=resolver,
         )
 
     def _insert_candidates(
@@ -887,19 +890,6 @@ class ColumnLineageAnalyzer:
                 )
                 for column in target_columns
             ]
-        if len(target_columns) != len(projections):
-            return [
-                self._unresolved(
-                    owner,
-                    durable_target,
-                    column,
-                    query.sql(),
-                    insert.sql(),
-                    sql_input,
-                    "TARGET_PROJECTION_MISMATCH",
-                )
-                for column in target_columns
-            ]
         return self._projection_candidates(
             owner,
             durable_target,
@@ -924,38 +914,10 @@ class ColumnLineageAnalyzer:
         scope = build_scope(select)
         if scope is None:
             return None
-        result: list[exp.Expression] = []
-        for projection in select.expressions:
-            is_star = isinstance(projection, exp.Star) or (
-                isinstance(projection, exp.Column)
-                and isinstance(projection.this, exp.Star)
-            )
-            if not is_star:
-                result.append(projection)
-                continue
-            table_alias = projection.table if isinstance(projection, exp.Column) else ""
-            sources = self._scope_source_objects(scope, catalog)
-            selected = [
-                value
-                for alias, value in sources.items()
-                if not table_alias or alias.casefold() == table_alias.casefold()
-            ]
-            if len(selected) != 1 or not selected[0].columns:
-                return None
-            ordered = sorted(
-                selected[0].columns, key=lambda column: column.ordinal_position
-            )
-            if [column.ordinal_position for column in ordered] != list(
-                range(1, len(ordered) + 1)
-            ):
-                return None
-            alias = next(
-                alias for alias, value in sources.items() if value is selected[0]
-            )
-            result.extend(
-                exp.column(column.column_name, table=alias) for column in ordered
-            )
-        return result
+        # Star expansion is centralized in QueryLineageResolver.  Keep the
+        # original projection list here so CTE/derived/UNION stars are handled
+        # by the same transient output model as ordinary SELECT analysis.
+        return list(select.expressions)
 
     def _projection_candidates(
         self,
@@ -969,37 +931,35 @@ class ColumnLineageAnalyzer:
         statement_sql: str,
         sql_input: _SqlInput,
         catalog: dict[tuple[str, ...], tuple[MetadataObject, ...]],
+        resolver: QueryLineageResolver | None = None,
     ) -> list[ColumnLineageCandidate]:
-        resolver = QueryLineageResolver(cast(exp.Expression, query), catalog)
-        outputs = resolver.outputs(query)
+        lineage_resolver = resolver or QueryLineageResolver(
+            cast(exp.Expression, query), catalog
+        )
+        outputs = lineage_resolver.outputs(query)
         candidates: list[ColumnLineageCandidate] = []
         available_target_columns = {
             column.column_name.casefold() for column in target_object.columns
         }
-        if isinstance(query, exp.Select) and (
-            len(outputs) != len(projections)
-            or any(
-                output.reason == "SELECT_STAR_METADATA_UNAVAILABLE"
-                for output in outputs
+        # Expanded stars intentionally produce more outputs than source
+        # projection nodes.  Target mappings are positional and are validated
+        # against the expanded output count here.
+        if len(target_columns) != len(outputs):
+            reason = next(
+                (output.reason for output in outputs if output.reason is not None),
+                "TARGET_PROJECTION_MISMATCH",
             )
-        ):
             outputs = tuple(
-                resolver.expression_output(query, projection)
-                for projection in projections
+                QueryOutput(column, reason=reason) for column in target_columns
             )
-        if len(outputs) != len(projections):
-            outputs = tuple(
-                QueryOutput(
-                    projection.alias_or_name or "?",
-                    reason="TARGET_PROJECTION_MISMATCH",
-                )
-                for projection in projections
-            )
-        for target_column, projection, output in zip(
-            target_columns, projections, outputs, strict=True
+        for index, (target_column, output) in enumerate(
+            zip(target_columns, outputs, strict=True)
         ):
+            projection = projections[index] if index < len(projections) else None
             expression = (
-                projection.this if isinstance(projection, exp.Alias) else projection
+                (projection.this if isinstance(projection, exp.Alias) else projection)
+                if projection is not None
+                else exp.column(output.name)
             )
             if not available_target_columns:
                 candidates.append(

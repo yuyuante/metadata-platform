@@ -13,7 +13,7 @@ from typing import cast
 from sqlglot import exp
 from sqlglot.optimizer.scope import Scope, build_scope, traverse_scope
 
-from emip.domain import ColumnLineageClassification, MetadataObject
+from emip.domain import Column, ColumnLineageClassification, MetadataObject
 from emip.identity import physical_identity_keys
 
 Catalog = dict[tuple[str, ...], tuple[MetadataObject, ...]]
@@ -189,10 +189,18 @@ class QueryLineageResolver:
             if isinstance(query, exp.SetOperation):
                 result = self._set_outputs(scope, depth)
             elif isinstance(query, exp.Select):
-                result = tuple(
-                    self._named_expression_output(scope, projection, depth)
-                    for projection in query.expressions
-                )
+                expanded: list[QueryOutput] = []
+                for projection in query.expressions:
+                    if isinstance(projection, exp.Star) or (
+                        isinstance(projection, exp.Column)
+                        and isinstance(projection.this, exp.Star)
+                    ):
+                        expanded.extend(self._star_outputs(scope, projection, depth))
+                    else:
+                        expanded.append(
+                            self._named_expression_output(scope, projection, depth)
+                        )
+                result = tuple(expanded)
             else:
                 result = (_unresolved("?", "QUERY_SHAPE_UNSUPPORTED"),)
             result = _apply_output_aliases(scope, result)
@@ -200,6 +208,66 @@ class QueryLineageResolver:
             return result
         finally:
             self._active.remove(key)
+
+    def _star_outputs(
+        self, scope: Scope, projection: exp.Expression, depth: int
+    ) -> tuple[QueryOutput, ...]:
+        """Expand a star from the already-loaded, ordered source metadata.
+
+        This is deliberately scope-local: no catalog lookup is performed for
+        transient sources and physical schemas must have contiguous, unique
+        ordinals before expansion is considered exact.
+        """
+        qualifier = projection.table if isinstance(projection, exp.Column) else ""
+        sources = list(_selected_sources(scope).items())
+        if qualifier:
+            sources = [
+                (alias, source)
+                for alias, source in sources
+                if alias.casefold() == qualifier.casefold()
+            ]
+        if not sources:
+            return (_unresolved("*", "SOURCE_OBJECT_UNRESOLVED"),)
+        outputs: list[QueryOutput] = []
+        for alias, source in sources:
+            if isinstance(source, Scope):
+                values = self._scope_outputs(source, depth + 1)
+                if not values or any(value.reason is not None for value in values):
+                    return (_unresolved("*", "SELECT_STAR_METADATA_UNAVAILABLE"),)
+                kind = _scope_source_kind(source, alias)
+                outputs.extend(
+                    QueryOutput(
+                        value.name,
+                        value.dependencies,
+                        value.classification,
+                        value.reason,
+                        ("QUALIFIED_STAR" if qualifier else "STAR", kind, *value.path),
+                    )
+                    for value in values
+                )
+                continue
+            if not isinstance(source, exp.Table):
+                return (_unresolved("*", "SELECT_STAR_METADATA_UNAVAILABLE"),)
+            item = _unique_object(_table_name(source), self._catalog)
+            columns = _ordered_columns(item) if item is not None else None
+            if columns is None:
+                return (_unresolved("*", "SELECT_STAR_METADATA_UNAVAILABLE"),)
+            for index, column in enumerate(columns, 1):
+                value = self._source_column(alias, source, column.column_name, depth)
+                if value.reason is not None:
+                    return (_unresolved(column.column_name, value.reason),)
+                outputs.append(
+                    QueryOutput(
+                        column.column_name,
+                        value.dependencies,
+                        value.classification,
+                        path=(
+                            "QUALIFIED_STAR" if qualifier else "STAR",
+                            f"STAR_POSITION[{index}]",
+                        ),
+                    )
+                )
+        return tuple(outputs)
 
     def _set_outputs(self, scope: Scope, depth: int) -> tuple[QueryOutput, ...]:
         branches = list(scope.union_scopes)
@@ -503,3 +571,20 @@ def _has_column(item: MetadataObject, column_name: str) -> bool:
         column.column_name.casefold() == column_name.casefold()
         for column in item.columns
     )
+
+
+def _ordered_columns(item: MetadataObject | None) -> tuple[Column, ...] | None:
+    if item is None or not item.columns:
+        return None
+    columns = tuple(item.columns)
+    ordinals = [column.ordinal_position for column in columns]
+    if any(value is None for value in ordinals):
+        return None
+    if len(set(ordinals)) != len(ordinals):
+        return None
+    ordered = tuple(sorted(columns, key=lambda column: column.ordinal_position))
+    if [column.ordinal_position for column in ordered] != list(
+        range(1, len(ordered) + 1)
+    ):
+        return None
+    return ordered
