@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from sqlglot import exp
 from sqlglot.errors import TokenError
 
 import emip.services.column_lineage as column_lineage_module
@@ -408,6 +409,57 @@ def test_informatica_embedded_update_uses_provider_aware_resolved_relations() ->
     assert values[0].target_system_name == "TGT_DB"
 
 
+def test_embedded_sql_provider_scope_is_independent_per_fragment() -> None:
+    source_a = _table("dbo.source", "x", provider="SYSTEM_A")
+    source_b = _table("dbo.source", "x", provider="SYSTEM_B")
+    target_a = _table("dbo.target", "a", provider="SYSTEM_A")
+    target_b = _table("dbo.target", "a", provider="SYSTEM_B")
+    mapping = MetadataObject.create(ObjectType.MAPPING, "INFA", "F::M", "M")
+    mapping.properties = tuple(
+        ObjectProperty(property_name=name, property_value=value)
+        for name, value in (
+            ("embedded_sql.1.status", "ANALYZED"),
+            (
+                "embedded_sql.1.resolved_sql",
+                "UPDATE dbo.target SET a=s.x FROM dbo.source s",
+            ),
+            ("embedded_sql.1.xml_context", "fragment-a"),
+            ("embedded_sql.2.status", "ANALYZED"),
+            (
+                "embedded_sql.2.resolved_sql",
+                "UPDATE dbo.target SET a=s.x + 1 FROM dbo.source s",
+            ),
+            ("embedded_sql.2.xml_context", "fragment-b"),
+        )
+    )
+    mapping.relation_candidates = tuple(
+        RelationCandidate(
+            mapping.qualified_name,
+            qualified_name,
+            relation_type,
+            "INFORMATICA_EMBEDDED_SQL",
+            json.dumps({"xml_context": context}),
+            system,
+        )
+        for context, system in (("fragment-a", "SYSTEM_A"), ("fragment-b", "SYSTEM_B"))
+        for qualified_name, relation_type in (
+            ("dbo.source", RelationType.READS),
+            ("dbo.target", RelationType.WRITES),
+        )
+    )
+
+    values = _analyze(mapping, source_a, source_b, target_a, target_b)
+
+    assert len(values) == 2
+    assert {
+        (value.source_system_name, value.target_system_name, value.expression)
+        for value in values
+    } == {
+        ("SYSTEM_A", "SYSTEM_A", "s.x"),
+        ("SYSTEM_B", "SYSTEM_B", "s.x + 1"),
+    }
+
+
 def test_conflicting_embedded_provider_evidence_does_not_use_global_fallback() -> None:
     source = _table("dbo.source", "x", provider="SRC_DB_A")
     target = _table("dbo.target", "a", provider="TGT_DB")
@@ -420,6 +472,16 @@ def test_conflicting_embedded_provider_evidence_does_not_use_global_fallback() -
             property_name="embedded_sql.1.resolved_sql",
             property_value="UPDATE dbo.target SET a=s.x FROM dbo.source s",
         ),
+        ObjectProperty(
+            property_name="embedded_sql.1.xml_context", property_value="fragment-a"
+        ),
+        ObjectProperty(property_name="embedded_sql.2.status", property_value="FAILED"),
+        ObjectProperty(
+            property_name="embedded_sql.2.raw_sql", property_value="SELECT 1"
+        ),
+        ObjectProperty(
+            property_name="embedded_sql.2.xml_context", property_value="fragment-b"
+        ),
     )
     mapping.relation_candidates = tuple(
         RelationCandidate(
@@ -427,7 +489,7 @@ def test_conflicting_embedded_provider_evidence_does_not_use_global_fallback() -
             "dbo.source",
             RelationType.READS,
             "INFORMATICA_EMBEDDED_SQL",
-            "conflicting session evidence",
+            json.dumps({"xml_context": "fragment-a"}),
             system,
         )
         for system in ("SRC_DB_A", "SRC_DB_B")
@@ -437,7 +499,7 @@ def test_conflicting_embedded_provider_evidence_does_not_use_global_fallback() -
             "dbo.target",
             RelationType.WRITES,
             "INFORMATICA_EMBEDDED_SQL",
-            "target evidence",
+            json.dumps({"xml_context": "fragment-a"}),
             "TGT_DB",
         ),
     )
@@ -446,6 +508,69 @@ def test_conflicting_embedded_provider_evidence_does_not_use_global_fallback() -
 
     assert values[0].classification is ColumnLineageClassification.UNRESOLVED
     assert values[0].unresolved_reason == "SOURCE_OBJECT_UNRESOLVED"
+
+
+@pytest.mark.parametrize(
+    "inert_text",
+    (
+        "RAISE NOTICE 'prefix; UPDATE dbo.target SET a = 1; suffix'",
+        "RAISE NOTICE 'it''s inert; UPDATE dbo.target SET a = 1; suffix'",
+        "RAISE NOTICE 'prefix; MERGE INTO dbo.target t USING dbo.source s "
+        "ON t.a=s.x WHEN MATCHED THEN UPDATE SET a=s.x; suffix'",
+        "PERFORM $message$prefix; UPDATE dbo.target SET a = 1; suffix$message$",
+    ),
+)
+def test_procedural_sql_looking_quoted_text_remains_inert(inert_text: str) -> None:
+    owner = _owner(
+        "CREATE FUNCTION dbo.f() RETURNS void AS $$ BEGIN "
+        f"{inert_text}; END; $$ LANGUAGE plpgsql"
+    )
+
+    assert _analyze(owner, _table("dbo.target", "a"), _table("dbo.source", "x")) == ()
+
+
+def test_procedural_sql_looking_comments_remain_inert() -> None:
+    sql = (
+        "CREATE FUNCTION dbo.f() RETURNS void AS $$ BEGIN "
+        "-- DELETE FROM dbo.target WHERE a=1; UPDATE dbo.target SET a=1;\n"
+        "/* prefix; UPDATE dbo.target SET a=1; suffix; */ "
+        "END; $$ LANGUAGE plpgsql"
+    )
+    analyzer = ColumnLineageAnalyzer()
+
+    expressions = analyzer._parse_expressions(sql)
+    assert not any(isinstance(value, exp.Delete) for value in expressions)
+    assert not any(isinstance(value, exp.Update) for value in expressions)
+
+
+def test_valid_procedural_update_outside_inert_text_is_analyzed() -> None:
+    owner = _owner(
+        "CREATE FUNCTION dbo.f() RETURNS void AS $$ BEGIN "
+        "RAISE NOTICE 'UPDATE dbo.target SET a=99;'; "
+        "UPDATE dbo.target SET a=1; END; $$ LANGUAGE plpgsql"
+    )
+
+    values = _analyze(owner, _table("dbo.target", "a"))
+
+    assert len(values) == 1
+    assert values[0].classification is ColumnLineageClassification.EXACT_EXPRESSION
+    assert values[0].expression == "1"
+
+
+def test_malformed_procedural_lexing_fails_closed_without_affecting_other_owner() -> (
+    None
+):
+    target = _table("dbo.target", "a")
+    malformed = _owner(
+        "CREATE FUNCTION dbo.bad() RETURNS void AS $$ BEGIN "
+        "RAISE NOTICE 'unterminated; UPDATE dbo.target SET a=1; END; $$"
+    )
+    valid = _owner("UPDATE dbo.target SET a=2")
+
+    ColumnLineageAnalyzer().analyze([target, malformed, valid])
+
+    assert malformed.column_lineage_candidates == ()
+    assert len(valid.column_lineage_candidates) == 1
 
 
 def test_malformed_dml_fails_closed_without_executing_input(tmp_path) -> None:

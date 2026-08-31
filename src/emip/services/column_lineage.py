@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import cast
 
-from sqlglot import TokenType, exp, parse
+from sqlglot import exp, parse
 from sqlglot.errors import ErrorLevel, ParseError, TokenError
 from sqlglot.optimizer.scope import Scope, build_scope
 from sqlglot.tokens import Tokenizer
@@ -143,7 +143,7 @@ class ColumnLineageAnalyzer:
             },
             key=int,
         )
-        embedded_systems = self._embedded_systems(item)
+        embedded_systems = self._embedded_systems(item, properties, indexes)
         for index in indexes:
             prefix = f"embedded_sql.{index}"
             status = properties.get(f"{prefix}.status", [""])[-1]
@@ -162,7 +162,7 @@ class ColumnLineageAnalyzer:
                     (properties.get(f"{prefix}.source_root") or [""])[-1] or None,
                     (properties.get(f"{prefix}.source_file") or [""])[-1] or None,
                     (properties.get(f"{prefix}.xml_context") or [prefix])[-1],
-                    embedded_systems,
+                    embedded_systems.get(prefix, ()),
                 )
             )
         return tuple(inputs)
@@ -170,20 +170,32 @@ class ColumnLineageAnalyzer:
     @staticmethod
     def _embedded_systems(
         item: MetadataObject,
-    ) -> tuple[tuple[tuple[str, ...], str | None], ...]:
-        systems: defaultdict[tuple[str, ...], set[str]] = defaultdict(set)
+        properties: dict[str, list[str]],
+        indexes: list[str],
+    ) -> dict[str, tuple[tuple[tuple[str, ...], str | None], ...]]:
+        systems: defaultdict[str, defaultdict[tuple[str, ...], set[str]]] = defaultdict(
+            lambda: defaultdict(set)
+        )
         for candidate in item.relation_candidates:
             if (
                 candidate.source_type != "INFORMATICA_EMBEDDED_SQL"
                 or candidate.target_system_name is None
             ):
                 continue
+            prefix = _embedded_fragment_prefix(
+                candidate.evidence_sql, properties, indexes
+            )
+            if prefix is None:
+                continue
             for key in physical_identity_keys(candidate.target_qualified_name):
-                systems[key].add(candidate.target_system_name)
-        return tuple(
-            (key, next(iter(values)) if len(values) == 1 else None)
-            for key, values in sorted(systems.items())
-        )
+                systems[prefix][key].add(candidate.target_system_name)
+        return {
+            prefix: tuple(
+                (key, next(iter(values)) if len(values) == 1 else None)
+                for key, values in sorted(fragment_systems.items())
+            )
+            for prefix, fragment_systems in systems.items()
+        }
 
     @staticmethod
     def _scoped_catalog(
@@ -230,26 +242,16 @@ class ColumnLineageAnalyzer:
         """Parse DML slices found by SQL tokens inside a procedural body."""
 
         parsed: list[exp.Expression] = []
-        for fragment in body.split(";"):
-            try:
-                tokens = Tokenizer(dialect="postgres").tokenize(fragment)
-            except (RecursionError, TokenError):
-                continue
-            start = next(
-                (
-                    token.start
-                    for token in tokens
-                    if token.token_type
-                    in {
-                        TokenType.INSERT,
-                        TokenType.UPDATE,
-                        TokenType.DELETE,
-                        TokenType.MERGE,
-                    }
-                ),
-                None,
-            )
+        fragments = _split_procedural_statements(body)
+        if fragments is None:
+            return parsed
+        for fragment in fragments:
+            start = _first_procedural_dml_start(fragment)
             if start is None:
+                continue
+            try:
+                Tokenizer(dialect="postgres").tokenize(fragment[start:])
+            except (RecursionError, TokenError):
                 continue
             try:
                 expressions = parse(
@@ -1054,6 +1056,229 @@ class ColumnLineageAnalyzer:
             target_system_name=target_system_name,
             unresolved_reason=reason,
         )
+
+
+def _embedded_fragment_prefix(
+    raw_evidence: str,
+    properties: dict[str, list[str]],
+    indexes: list[str],
+) -> str | None:
+    """Associate provider evidence with one embedded SQL fragment only."""
+
+    if len(indexes) == 1:
+        # Existing persisted candidates may predate structured fragment evidence.
+        return f"embedded_sql.{indexes[0]}"
+    try:
+        evidence = json.loads(raw_evidence)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(evidence, dict):
+        return None
+
+    xml_context = evidence.get("xml_context")
+    if isinstance(xml_context, str) and xml_context:
+        matches = [
+            f"embedded_sql.{index}"
+            for index in indexes
+            if xml_context in properties.get(f"embedded_sql.{index}.xml_context", [])
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    matches = []
+    for index in indexes:
+        candidate_prefix = f"embedded_sql.{index}"
+        if _embedded_fragment_evidence_matches(evidence, properties, candidate_prefix):
+            matches.append(candidate_prefix)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _embedded_fragment_evidence_matches(
+    evidence: dict[object, object],
+    properties: dict[str, list[str]],
+    prefix: str,
+) -> bool:
+    compared = False
+    for evidence_name, property_name in (
+        ("raw_sql", "raw_sql"),
+        ("resolved_sql", "resolved_sql"),
+        ("property", "property"),
+        ("source_file", "source_file"),
+        ("source_root", "source_root"),
+        ("role", "role"),
+    ):
+        value = evidence.get(evidence_name)
+        expected = properties.get(f"{prefix}.{property_name}", [])
+        if value is None or not expected:
+            continue
+        compared = True
+        if not isinstance(value, str) or value not in expected:
+            return False
+    return compared
+
+
+def _split_procedural_statements(body: str) -> tuple[str, ...] | None:
+    """Split procedural text at lexically safe semicolons in one O(n) scan."""
+
+    statements: list[str] = []
+    start = 0
+    index = 0
+    state = "NORMAL"
+    block_depth = 0
+    dollar_delimiter = ""
+    while index < len(body):
+        char = body[index]
+        following = body[index + 1] if index + 1 < len(body) else ""
+        if state == "NORMAL":
+            if char == "'":
+                state = "SINGLE_QUOTE"
+            elif char == '"':
+                state = "DOUBLE_QUOTE"
+            elif char == "-" and following == "-":
+                state = "LINE_COMMENT"
+                index += 1
+            elif char == "/" and following == "*":
+                state = "BLOCK_COMMENT"
+                block_depth = 1
+                index += 1
+            elif char == "$":
+                delimiter = _dollar_quote_delimiter(body, index)
+                if delimiter is not None:
+                    state = "DOLLAR_QUOTE"
+                    dollar_delimiter = delimiter
+                    index += len(delimiter) - 1
+            elif char == ";":
+                fragment = body[start:index]
+                if fragment.strip():
+                    statements.append(fragment)
+                start = index + 1
+        elif state == "SINGLE_QUOTE":
+            if char == "\\":
+                index += 1
+            elif char == "'" and following == "'":
+                index += 1
+            elif char == "'":
+                state = "NORMAL"
+        elif state == "DOUBLE_QUOTE":
+            if char == '"' and following == '"':
+                index += 1
+            elif char == '"':
+                state = "NORMAL"
+        elif state == "LINE_COMMENT":
+            if char in "\r\n":
+                state = "NORMAL"
+        elif state == "BLOCK_COMMENT":
+            if char == "/" and following == "*":
+                block_depth += 1
+                index += 1
+            elif char == "*" and following == "/":
+                block_depth -= 1
+                index += 1
+                if block_depth == 0:
+                    state = "NORMAL"
+        elif body.startswith(dollar_delimiter, index):
+            index += len(dollar_delimiter) - 1
+            state = "NORMAL"
+            dollar_delimiter = ""
+        index += 1
+
+    if state not in {"NORMAL", "LINE_COMMENT"}:
+        return None
+    fragment = body[start:]
+    if fragment.strip():
+        statements.append(fragment)
+    return tuple(statements)
+
+
+def _dollar_quote_delimiter(body: str, start: int) -> str | None:
+    """Return a valid, bounded PostgreSQL dollar-quote opener at ``start``."""
+
+    end = start + 1
+    if end >= len(body):
+        return None
+    if body[end] == "$":
+        return "$$"
+    if not (body[end].isalpha() or body[end] == "_"):
+        return None
+    end += 1
+    while end < len(body) and (body[end].isalnum() or body[end] == "_"):
+        end += 1
+    if end >= len(body) or body[end] != "$":
+        return None
+    return body[start : end + 1]
+
+
+def _first_procedural_dml_start(fragment: str) -> int | None:
+    """Find an executable DML keyword without inspecting inert lexical text."""
+
+    index = 0
+    state = "NORMAL"
+    block_depth = 0
+    dollar_delimiter = ""
+    while index < len(fragment):
+        char = fragment[index]
+        following = fragment[index + 1] if index + 1 < len(fragment) else ""
+        if state == "NORMAL":
+            if char == "'":
+                state = "SINGLE_QUOTE"
+            elif char == '"':
+                state = "DOUBLE_QUOTE"
+            elif char == "-" and following == "-":
+                state = "LINE_COMMENT"
+                index += 1
+            elif char == "/" and following == "*":
+                state = "BLOCK_COMMENT"
+                block_depth = 1
+                index += 1
+            elif char == "$":
+                delimiter = _dollar_quote_delimiter(fragment, index)
+                if delimiter is not None:
+                    state = "DOLLAR_QUOTE"
+                    dollar_delimiter = delimiter
+                    index += len(delimiter) - 1
+            elif char.isalpha() or char == "_":
+                end = index + 1
+                while end < len(fragment) and (
+                    fragment[end].isalnum() or fragment[end] in {"_", "$"}
+                ):
+                    end += 1
+                if fragment[index:end].upper() in {
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "MERGE",
+                }:
+                    return index
+                index = end - 1
+        elif state == "SINGLE_QUOTE":
+            if char == "\\":
+                index += 1
+            elif char == "'" and following == "'":
+                index += 1
+            elif char == "'":
+                state = "NORMAL"
+        elif state == "DOUBLE_QUOTE":
+            if char == '"' and following == '"':
+                index += 1
+            elif char == '"':
+                state = "NORMAL"
+        elif state == "LINE_COMMENT":
+            if char in "\r\n":
+                state = "NORMAL"
+        elif state == "BLOCK_COMMENT":
+            if char == "/" and following == "*":
+                block_depth += 1
+                index += 1
+            elif char == "*" and following == "/":
+                block_depth -= 1
+                index += 1
+                if block_depth == 0:
+                    state = "NORMAL"
+        elif fragment.startswith(dollar_delimiter, index):
+            index += len(dollar_delimiter) - 1
+            state = "NORMAL"
+            dollar_delimiter = ""
+        index += 1
+    return None
 
 
 def _unique_object(
