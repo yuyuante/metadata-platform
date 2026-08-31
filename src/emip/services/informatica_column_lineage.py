@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from collections.abc import Callable, Iterable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from emip.domain import (
     ColumnLineageCandidate,
@@ -22,6 +24,33 @@ _DEFINITION_TYPES = {
     "target": ObjectType.TARGET_DEFINITION,
 }
 DefinitionResolver = Callable[[MetadataObject, str | None], MetadataObject | None]
+ConnectionStatus = Literal["EXACT", "AMBIGUOUS", "UNAVAILABLE"]
+
+
+@dataclass(frozen=True, slots=True)
+class _ConnectionResolution:
+    value: str | None
+    status: ConnectionStatus
+
+
+@dataclass(frozen=True, slots=True)
+class _ConnectionIndex:
+    """Immutable analyze-scoped connection lookup built by two object scans."""
+
+    mapping_sessions: dict[str, frozenset[str]]
+    session_connections: dict[tuple[str, str, ObjectType], _ConnectionResolution]
+    mapping_connections: dict[tuple[str, str, ObjectType], _ConnectionResolution]
+
+    def resolve(
+        self,
+        mapping: MetadataObject,
+        instance_name: str,
+        kind: ObjectType,
+    ) -> _ConnectionResolution:
+        return self.mapping_connections.get(
+            (mapping.qualified_name.casefold(), instance_name.casefold(), kind),
+            _ConnectionResolution(None, "UNAVAILABLE"),
+        )
 
 
 class InformaticaColumnLineageAnalyzer:
@@ -38,6 +67,7 @@ class InformaticaColumnLineageAnalyzer:
             for item in values
             if item.object_type in set(_DEFINITION_TYPES.values())
         }
+        connections = _build_connection_index(values)
         for mapping in values:
             if mapping.object_type is not ObjectType.MAPPING:
                 continue
@@ -52,8 +82,8 @@ class InformaticaColumnLineageAnalyzer:
                     self._candidates(
                         mapping,
                         raw,
-                        values,
                         definitions,
+                        connections,
                         resolve_definition,
                     )
                 )
@@ -63,8 +93,8 @@ class InformaticaColumnLineageAnalyzer:
         self,
         mapping: MetadataObject,
         raw: str,
-        objects: list[MetadataObject],
         definitions: dict[tuple[ObjectType, str], MetadataObject],
+        connections: _ConnectionIndex,
         resolve_definition: DefinitionResolver,
     ) -> list[ColumnLineageCandidate]:
         try:
@@ -90,9 +120,10 @@ class InformaticaColumnLineageAnalyzer:
                 )
             )
             target_instance = _text(value.get("target_instance"))
-            target_connection = _connection_for(
-                objects, mapping, target_instance, ObjectType.TARGET_DEFINITION
+            target_connection_resolution = connections.resolve(
+                mapping, target_instance, ObjectType.TARGET_DEFINITION
             )
+            target_connection = target_connection_resolution.value
             target = (
                 resolve_definition(target_definition, target_connection)
                 if target_definition is not None
@@ -111,16 +142,14 @@ class InformaticaColumnLineageAnalyzer:
                 else None
             )
             source_instance = _optional_text(value.get("source_instance"))
-            source_connection = (
-                _connection_for(
-                    objects,
-                    mapping,
-                    source_instance,
-                    ObjectType.SOURCE_DEFINITION,
+            source_connection_resolution = (
+                connections.resolve(
+                    mapping, source_instance, ObjectType.SOURCE_DEFINITION
                 )
                 if source_instance
-                else None
+                else _ConnectionResolution(None, "UNAVAILABLE")
             )
+            source_connection = source_connection_resolution.value
             source = (
                 resolve_definition(source_definition, source_connection)
                 if source_definition is not None
@@ -136,16 +165,21 @@ class InformaticaColumnLineageAnalyzer:
                 if target is None:
                     classification = ColumnLineageClassification.UNRESOLVED
                     unresolved_reason = "TARGET_OBJECT_UNRESOLVED"
-                elif target.columns and not _has_column(target, target_column):
+                elif not target.columns:
+                    classification = ColumnLineageClassification.UNRESOLVED
+                    unresolved_reason = "TARGET_COLUMN_METADATA_UNAVAILABLE"
+                elif not _has_column(target, target_column):
                     classification = ColumnLineageClassification.UNRESOLVED
                     unresolved_reason = "TARGET_COLUMN_UNAVAILABLE"
                 elif source_definition_name and source is None:
                     classification = ColumnLineageClassification.UNRESOLVED
                     unresolved_reason = "SOURCE_OBJECT_UNRESOLVED"
+                elif source is not None and source_column and not source.columns:
+                    classification = ColumnLineageClassification.UNRESOLVED
+                    unresolved_reason = "SOURCE_COLUMN_METADATA_UNAVAILABLE"
                 elif (
                     source is not None
                     and source_column
-                    and source.columns
                     and not _has_column(source, source_column)
                 ):
                     classification = ColumnLineageClassification.UNRESOLVED
@@ -156,9 +190,13 @@ class InformaticaColumnLineageAnalyzer:
                 ):
                     classification = ColumnLineageClassification.UNRESOLVED
                     unresolved_reason = "SOURCE_DEPENDENCY_UNAVAILABLE"
-            lookup_connections = {
-                instance: _connection_for(objects, mapping, instance, ObjectType.LOOKUP)
+            lookup_resolutions = {
+                instance: connections.resolve(mapping, instance, ObjectType.LOOKUP)
                 for instance in _string_list(value.get("lookup_instances"))
+            }
+            lookup_connections = {
+                instance: resolution.value
+                for instance, resolution in lookup_resolutions.items()
             }
             evidence_value: dict[str, object] = {
                 "kind": "informatica_port_lineage",
@@ -166,12 +204,18 @@ class InformaticaColumnLineageAnalyzer:
                 "target_definition": target_definition_name,
                 "target_instance": target_instance,
                 "target_connection": target_connection,
+                "target_connection_status": target_connection_resolution.status,
                 "target_system": target.system_name if target else None,
                 "source_definition": source_definition_name,
                 "source_instance": source_instance,
                 "source_connection": source_connection,
+                "source_connection_status": source_connection_resolution.status,
                 "source_system": source.system_name if source else None,
                 "lookup_connections": lookup_connections,
+                "lookup_connection_statuses": {
+                    instance: resolution.status
+                    for instance, resolution in lookup_resolutions.items()
+                },
                 "path": (
                     value.get("path") if isinstance(value.get("path"), list) else []
                 ),
@@ -233,42 +277,68 @@ def _folder_qn(mapping: MetadataObject, definition: str) -> str:
     return f"{folder}::{definition}".casefold()
 
 
-def _connection_for(
-    objects: list[MetadataObject],
-    mapping: MetadataObject,
-    instance_name: str,
-    kind: ObjectType,
-) -> str | None:
-    sessions = {
-        item.qualified_name.casefold(): item
-        for item in objects
-        if item.object_type is ObjectType.SESSION
-        and any(
-            relation.relation_type is RelationType.EXECUTES
-            and relation.target_qualified_name.casefold()
-            == mapping.qualified_name.casefold()
-            for relation in item.relation_candidates
-        )
-    }
-    values: set[str] = set()
+def _build_connection_index(objects: list[MetadataObject]) -> _ConnectionIndex:
+    """Build mapping/session and connection indexes once for one analysis call."""
+
+    mapping_sessions: dict[str, set[str]] = defaultdict(set)
+    session_mappings: dict[str, set[str]] = defaultdict(set)
     for item in objects:
-        if (
-            item.object_type is not kind
-            or item.name.casefold() != instance_name.casefold()
-        ):
+        if item.object_type is not ObjectType.SESSION:
             continue
-        if not any(
-            item.qualified_name.casefold().startswith(f"{session_qn}::")
-            for session_qn in sessions
-        ):
+        session_key = item.qualified_name.casefold()
+        for relation in item.relation_candidates:
+            if relation.relation_type is not RelationType.EXECUTES:
+                continue
+            mapping_key = relation.target_qualified_name.casefold()
+            mapping_sessions[mapping_key].add(session_key)
+            session_mappings[session_key].add(mapping_key)
+
+    supported_types = frozenset(
+        {
+            ObjectType.SOURCE_DEFINITION,
+            ObjectType.TARGET_DEFINITION,
+            ObjectType.LOOKUP,
+        }
+    )
+    session_values: dict[tuple[str, str, ObjectType], set[str]] = defaultdict(set)
+    mapping_values: dict[tuple[str, str, ObjectType], set[str]] = defaultdict(set)
+    for item in objects:
+        if item.object_type not in supported_types or "::" not in item.qualified_name:
             continue
-        values.update(
+        session_key = item.qualified_name.rsplit("::", 1)[0].casefold()
+        mapping_keys = session_mappings.get(session_key)
+        if not mapping_keys:
+            continue
+        key_suffix = (item.name.casefold(), item.object_type)
+        values = {
             prop.property_value
             for prop in item.properties
             if prop.property_name == "connectionreference.connectionname"
             and prop.property_value
-        )
-    return next(iter(values)) if len(values) == 1 else None
+        }
+        session_values[(session_key, *key_suffix)].update(values)
+        for mapping_key in mapping_keys:
+            mapping_values[(mapping_key, *key_suffix)].update(values)
+
+    return _ConnectionIndex(
+        mapping_sessions={
+            key: frozenset(value) for key, value in mapping_sessions.items()
+        },
+        session_connections={
+            key: _connection_resolution(value) for key, value in session_values.items()
+        },
+        mapping_connections={
+            key: _connection_resolution(value) for key, value in mapping_values.items()
+        },
+    )
+
+
+def _connection_resolution(values: set[str]) -> _ConnectionResolution:
+    if len(values) == 1:
+        return _ConnectionResolution(next(iter(values)), "EXACT")
+    if values:
+        return _ConnectionResolution(None, "AMBIGUOUS")
+    return _ConnectionResolution(None, "UNAVAILABLE")
 
 
 def _classification(value: Any) -> ColumnLineageClassification:

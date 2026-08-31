@@ -27,7 +27,10 @@ remain stable unresolved evidence without disrupting unrelated mappings.
 
 Physical source and target resolution is independent and provider/connection-aware.
 The lookup connection is evidence only and cannot force source or target provider
-identity. Object-level `READS`, `WRITES`, and `CALLS` behavior is unchanged.
+identity. Exact physical lineage requires positive proof from a nonempty loaded column
+catalog: the referenced source and target columns must exist. Unavailable catalogs and
+missing named columns produce distinct stable unresolved reasons. Object-level
+`READS`, `WRITES`, and `CALLS` behavior is unchanged.
 
 ## Persistence and query evidence
 
@@ -63,9 +66,14 @@ PowerCenter expressions or executes analyzed SQL/commands. Existing external-ent
 rejection and path-containment policy remain in force, and hostile expression-shaped
 text is tested as inert evidence. Mapping traversal is cycle-safe and bounded.
 
-Instances, ports, and incoming connectors are indexed once per mapping. Physical
+Instances, ports, and incoming connectors are indexed once per mapping. Executing
+sessions and source/target/lookup connection identities are indexed once per analysis
+call. Normalized provider-aware physical identities and connection aliases are indexed
+once per integration call. Resolution consumes these bounded indexes, so it performs
+no global metadata scan per lineage record or physical boundary. Physical
 objects/columns are preloaded once per integration run; there is no DB query per port,
-connector, or target field and no XML reparse at query time. No migration was needed.
+connector, or target field and no XML reparse at query time. A many-record structural
+regression asserts each global index builder runs once. No migration was needed.
 Persistence remains Greenplum 6 / PostgreSQL 9.4 compatible and contains no
 `ON CONFLICT`.
 

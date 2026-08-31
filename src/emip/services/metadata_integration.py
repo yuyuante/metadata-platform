@@ -135,6 +135,51 @@ def _connection_matches_physical(connection_name: str, item: MetadataObject) -> 
     return bool(aliases and aliases & _physical_connection_aliases(item))
 
 
+@dataclass(frozen=True, slots=True)
+class _PhysicalIdentityIndex:
+    """Precomputed physical identity and provider aliases for one integration."""
+
+    by_key: dict[tuple[str, ...], tuple[MetadataObject, ...]]
+    aliases_by_id: dict[str, frozenset[str]]
+
+    def resolve(
+        self,
+        definition_keys: set[tuple[str, ...]],
+        connection_name: str | None,
+    ) -> MetadataObject | None:
+        connection_aliases = (
+            _connection_aliases(connection_name) if connection_name else None
+        )
+        matches: dict[str, MetadataObject] = {}
+        for key in definition_keys:
+            for target in self.by_key.get(key, ()):
+                object_key = str(target.object_id)
+                if connection_aliases is not None and not (
+                    connection_aliases & self.aliases_by_id[object_key]
+                ):
+                    continue
+                matches[object_key] = target
+        return next(iter(matches.values())) if len(matches) == 1 else None
+
+
+def _build_physical_identity_index(
+    physical_objects: Iterable[MetadataObject],
+) -> _PhysicalIdentityIndex:
+    """Scan the physical catalog once and freeze its reusable lookup buckets."""
+
+    by_key: dict[tuple[str, ...], dict[str, MetadataObject]] = defaultdict(dict)
+    aliases_by_id: dict[str, frozenset[str]] = {}
+    for item in physical_objects:
+        object_key = str(item.object_id)
+        aliases_by_id[object_key] = frozenset(_physical_connection_aliases(item))
+        for key in physical_identity_keys(item.qualified_name):
+            by_key[key][object_key] = item
+    return _PhysicalIdentityIndex(
+        by_key={key: tuple(values.values()) for key, values in by_key.items()},
+        aliases_by_id=aliases_by_id,
+    )
+
+
 def _embedded_sql_connection(candidate: RelationCandidate) -> str | None:
     """Read the captured connection context from structured SQL evidence."""
 
@@ -216,10 +261,11 @@ class MetadataIntegrationService:
             for item in persisted_physical + integrated
             if item.object_type in _PHYSICAL_TYPES
         ]
+        physical_index = _build_physical_identity_index(physical_values)
         InformaticaColumnLineageAnalyzer().analyze(
             integrated,
-            lambda definition, connection: self._resolve_definition_object(
-                definition, connection, physical_values
+            lambda definition, connection: physical_index.resolve(
+                self._definition_keys(definition), connection
             ),
         )
         ColumnLineageAnalyzer().analyze(integrated, persisted_physical)
@@ -319,25 +365,6 @@ class MetadataIntegrationService:
                 definition.relation_candidates += (candidate,)
                 created += 1
         return created
-
-    def _resolve_definition_object(
-        self,
-        definition: MetadataObject,
-        connection_name: str | None,
-        physical_objects: list[MetadataObject],
-    ) -> MetadataObject | None:
-        """Resolve one boundary once from the preloaded provider-aware catalog."""
-
-        definition_keys = self._definition_keys(definition)
-        matches: dict[str, MetadataObject] = {}
-        for target in physical_objects:
-            if connection_name and not _connection_matches_physical(
-                connection_name, target
-            ):
-                continue
-            if definition_keys & set(physical_identity_keys(target.qualified_name)):
-                matches[str(target.object_id)] = target
-        return next(iter(matches.values())) if len(matches) == 1 else None
 
     @staticmethod
     def _resolve_embedded_sql_links(

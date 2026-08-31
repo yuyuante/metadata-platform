@@ -7,10 +7,13 @@ from emip.domain import (
     Column,
     ColumnLineageClassification,
     MetadataObject,
+    ObjectProperty,
     ObjectType,
 )
 from emip.parser.informatica.port_lineage import _PROPERTY_NAME
 from emip.parser.informatica.xml_parser import InformaticaMetadataParser
+from emip.services import informatica_column_lineage as informatica_lineage_module
+from emip.services import metadata_integration as integration_module
 from emip.services.metadata_integration import MetadataIntegrationService
 
 
@@ -73,16 +76,20 @@ def _records(objects: tuple[MetadataObject, ...]) -> list[dict[str, object]]:
     return records
 
 
-def _physical(kind: ObjectType, system: str, name: str) -> MetadataObject:
+def _physical(
+    kind: ObjectType,
+    system: str,
+    name: str,
+    column_names: tuple[str, ...] = ("A", "B", "X"),
+) -> MetadataObject:
     return MetadataObject.create(
         kind,
         system,
         f"dbo.{name}",
         name,
-        columns=(
-            Column(column_name="A", ordinal_position=1),
-            Column(column_name="B", ordinal_position=2),
-            Column(column_name="X", ordinal_position=3),
+        columns=tuple(
+            Column(column_name=column_name, ordinal_position=position)
+            for position, column_name in enumerate(column_names, start=1)
         ),
     )
 
@@ -390,6 +397,148 @@ def test_missing_physical_target_column_never_becomes_exact(tmp_path: Path) -> N
     assert candidate.target_column_name == "TYPO_X"
     assert candidate.unresolved_reason == "TARGET_COLUMN_UNAVAILABLE"
     assert "TYPO_X" in candidate.statement_sql
+
+
+def test_resolved_target_without_column_metadata_is_unresolved(
+    tmp_path: Path,
+) -> None:
+    xml = _xml(
+        "Source Qualifier",
+        '<TRANSFORMFIELD NAME="A" PORTTYPE="INPUT/OUTPUT" />',
+        _connector("SRC_I", "A", "TR_I", "A") + _connector("TR_I", "A", "TGT_I", "X"),
+    )
+    physical = (
+        _physical(ObjectType.TABLE, "DB", "SRC"),
+        _physical(ObjectType.TABLE, "DB", "TGT", ()),
+    )
+
+    candidate = _candidates(_parse(tmp_path, xml), physical)[0]
+
+    assert candidate.classification is ColumnLineageClassification.UNRESOLVED
+    assert candidate.unresolved_reason == "TARGET_COLUMN_METADATA_UNAVAILABLE"
+
+
+def test_resolved_source_without_column_metadata_is_unresolved(
+    tmp_path: Path,
+) -> None:
+    xml = _xml(
+        "Source Qualifier",
+        '<TRANSFORMFIELD NAME="A" PORTTYPE="INPUT/OUTPUT" />',
+        _connector("SRC_I", "A", "TR_I", "A") + _connector("TR_I", "A", "TGT_I", "X"),
+    )
+    physical = (
+        _physical(ObjectType.TABLE, "DB", "SRC", ()),
+        _physical(ObjectType.TABLE, "DB", "TGT"),
+    )
+
+    candidate = _candidates(_parse(tmp_path, xml), physical)[0]
+
+    assert candidate.classification is ColumnLineageClassification.UNRESOLVED
+    assert candidate.unresolved_reason == "SOURCE_COLUMN_METADATA_UNAVAILABLE"
+
+
+def test_loaded_source_catalog_missing_named_column_is_unresolved(
+    tmp_path: Path,
+) -> None:
+    xml = _xml(
+        "Source Qualifier",
+        '<TRANSFORMFIELD NAME="A" PORTTYPE="INPUT/OUTPUT" />',
+        _connector("SRC_I", "A", "TR_I", "A") + _connector("TR_I", "A", "TGT_I", "X"),
+    )
+    physical = (
+        _physical(ObjectType.TABLE, "DB", "SRC", ("B",)),
+        _physical(ObjectType.TABLE, "DB", "TGT"),
+    )
+
+    candidate = _candidates(_parse(tmp_path, xml), physical)[0]
+
+    assert candidate.classification is ColumnLineageClassification.UNRESOLVED
+    assert candidate.unresolved_reason == "SOURCE_COLUMN_UNAVAILABLE"
+
+
+def test_constant_expression_requires_proven_target_column_metadata(
+    tmp_path: Path,
+) -> None:
+    xml = _xml(
+        "Expression",
+        '<TRANSFORMFIELD NAME="OUT" PORTTYPE="OUTPUT" EXPRESSION="42" />',
+        _connector("TR_I", "OUT", "TGT_I", "X"),
+    )
+    physical = (
+        _physical(ObjectType.TABLE, "DB", "SRC"),
+        _physical(ObjectType.TABLE, "DB", "TGT", ()),
+    )
+
+    candidate = _candidates(_parse(tmp_path, xml), physical)[0]
+
+    assert candidate.classification is ColumnLineageClassification.UNRESOLVED
+    assert candidate.source_qualified_name is None
+    assert candidate.source_column_name is None
+    assert candidate.unresolved_reason == "TARGET_COLUMN_METADATA_UNAVAILABLE"
+
+
+def test_global_resolution_indexes_are_built_once_for_many_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    xml = _xml(
+        "Source Qualifier",
+        '<TRANSFORMFIELD NAME="A" PORTTYPE="INPUT/OUTPUT" />',
+        _connector("SRC_I", "A", "TR_I", "A") + _connector("TR_I", "A", "TGT_I", "X"),
+    )
+    parsed = _parse(tmp_path, xml)
+    mapping = next(item for item in parsed if item.object_type is ObjectType.MAPPING)
+    raw = next(
+        prop.property_value
+        for prop in mapping.properties
+        if prop.property_name == _PROPERTY_NAME
+    )
+    assert raw is not None
+    document = json.loads(raw)
+    document["records"] = document["records"] * 250
+    mapping.properties = tuple(
+        ObjectProperty(
+            property_name=prop.property_name,
+            property_value=(
+                json.dumps(document)
+                if prop.property_name == _PROPERTY_NAME
+                else prop.property_value
+            ),
+        )
+        for prop in mapping.properties
+    )
+
+    connection_builds = 0
+    physical_builds = 0
+    original_connection_builder = informatica_lineage_module._build_connection_index
+    original_physical_builder = integration_module._build_physical_identity_index
+
+    def counted_connection_builder(objects: list[MetadataObject]):
+        nonlocal connection_builds
+        connection_builds += 1
+        return original_connection_builder(objects)
+
+    def counted_physical_builder(objects):
+        nonlocal physical_builds
+        physical_builds += 1
+        return original_physical_builder(objects)
+
+    monkeypatch.setattr(
+        informatica_lineage_module,
+        "_build_connection_index",
+        counted_connection_builder,
+    )
+    monkeypatch.setattr(
+        integration_module,
+        "_build_physical_identity_index",
+        counted_physical_builder,
+    )
+
+    candidates = _candidates(parsed)
+
+    assert connection_builds == 1
+    assert physical_builds == 1
+    assert len(candidates) == 1
+    assert candidates[0].classification is ColumnLineageClassification.EXACT_DIRECT
 
 
 def test_malformed_mapping_metadata_does_not_fail_unrelated_mapping(
