@@ -209,6 +209,44 @@ def test_column_lineage_parser_integration_persistence_reload_query_round_trip(
     assert all(value["evidence"] for value in incoming)
 
 
+def test_dml_column_lineage_is_idempotent_and_survives_detached_query(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dml-column-lineage.sql"
+    path.write_text(
+        "CREATE TABLE dbo.source_table (x integer, y integer);\n"
+        "CREATE TABLE dbo.target_table (a integer);\n"
+        "CREATE PROCEDURE dbo.update_target AS BEGIN\n"
+        "UPDATE t SET t.a = s.x + s.y\n"
+        "FROM dbo.target_table t JOIN dbo.source_table s ON 1 = 1;\n"
+        "END;\n",
+        encoding="utf-8",
+    )
+    integrated = MetadataIntegrationService().integrate(SqlDdlParser().parse(path))
+    repository = RoundTripRepository()
+    persister = MetadataObjectPersister(cast(MetadataRepository, repository))
+
+    first = persister.persist(integrated.objects)
+    lineage_count = len(repository.column_lineage)
+    second = persister.persist(integrated.objects)
+    detached = QueryEngine(cast(QueryRepository, repository)).column_lineage(
+        "dbo.target_table"
+    )
+
+    assert first.objects_created == 3
+    assert second.objects_created == 0
+    assert lineage_count == 2
+    assert len(repository.column_lineage) == lineage_count
+    incoming = detached["incoming"]
+    assert isinstance(incoming, list)
+    assert {value["source_column_name"] for value in incoming} == {"x", "y"}
+    assert {value["classification"] for value in incoming} == {"EXACT_EXPRESSION"}
+    assert {value["dml"]["operation"] for value in incoming} == {"UPDATE"}
+    assert all(
+        json.loads(value["evidence"])["operation"] == "UPDATE" for value in incoming
+    )
+
+
 def test_informatica_port_lineage_is_idempotent_and_survives_detached_query(
     tmp_path: Path,
 ) -> None:

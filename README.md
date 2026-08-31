@@ -305,13 +305,18 @@ These cases need either richer static evidence, configuration ingestion, runtime
 **Current status: Conservative foundation implemented.**
 
 EMIP persists evidence-rich `EXACT_DIRECT`, `EXACT_EXPRESSION`, and `UNRESOLVED`
-dependencies for explicit `INSERT ... SELECT` target columns and view/materialized
-view projections. Resolution uses SQLGlot AST scope plus already loaded object-column
-metadata; it never queries a database per reference. Unqualified columns require one
-unambiguous metadata owner, and `SELECT *` expands only from one source with complete,
-contiguously ordered columns. Exact reconstructed Dynamic SQL and exactly resolved
-Informatica embedded SQL reuse this analyzer. Possible/unresolved Dynamic SQL and
-runtime-dependent Informatica SQL never creates exact lineage. PowerCenter 10.2
+dependencies for explicit `INSERT ... SELECT` target columns, view/materialized-view
+projections, `UPDATE` assignments, and supported `MERGE` matched-update and
+not-matched-insert branches. `DELETE` preserves object-level dependencies but never
+fabricates value-derivation column edges from predicates. Resolution uses SQLGlot AST
+and already loaded object-column metadata; it never queries a database per reference.
+Unqualified columns require one unambiguous metadata owner, and `SELECT *` expands only
+from one source with complete, contiguously ordered columns. Exact reconstructed
+Dynamic SQL and exactly resolved Informatica embedded SQL reuse the shared DML
+analyzer. Possible/unresolved Dynamic SQL and runtime-dependent Informatica SQL never
+create exact lineage. Each `UPDATE` assignment and `MERGE` branch retains separate
+expression and statement evidence; runtime branch reachability is not inferred.
+PowerCenter 10.2
 mapping lineage additionally follows exact, mapping-scoped `CONNECTOR` paths from
 Source Definition fields through evidenced Source Qualifier, Expression, Lookup,
 Aggregator, Router, Filter, and Update Strategy ports to Target Definition fields.
