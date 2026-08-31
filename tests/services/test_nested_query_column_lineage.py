@@ -233,6 +233,105 @@ def test_view_projection_through_cte_reaches_physical_source() -> None:
     assert view.column_lineage_candidates[0].source_column_name == "a"
 
 
+def test_case_value_dependencies_exclude_searched_predicates() -> None:
+    source = _table("dbo.source", "id", "p1", "p2", "a", "b", "c")
+    target = _table("dbo.target", "value")
+    values = _analyze(
+        "INSERT INTO dbo.target(value) SELECT CASE "
+        "WHEN s.p1=1 THEN s.a WHEN s.p2=1 THEN s.b ELSE s.c END "
+        "FROM dbo.source s",
+        source,
+        target,
+    )
+    assert {value.source_column_name for value in values} == {"a", "b", "c"}
+    assert "p1" not in {value.source_column_name for value in values}
+    assert "p2" not in {value.source_column_name for value in values}
+
+
+def test_case_simple_selector_and_nested_predicates_are_excluded() -> None:
+    source = _table("dbo.source", "status", "flag", "kind", "a", "b", "c")
+    target = _table("dbo.target", "value")
+    values = _analyze(
+        "INSERT INTO dbo.target(value) SELECT CASE s.status "
+        "WHEN 'A' THEN CASE WHEN s.flag=1 THEN s.a ELSE s.b END "
+        "ELSE s.c END FROM dbo.source s",
+        source,
+        target,
+    )
+    assert {value.source_column_name for value in values} == {"a", "b", "c"}
+
+
+def test_case_constants_have_no_source_dependency() -> None:
+    source = _table("dbo.source", "flag")
+    target = _table("dbo.target", "value")
+    values = _analyze(
+        "INSERT INTO dbo.target(value) SELECT CASE WHEN s.flag=1 THEN 1 ELSE 2 END "
+        "FROM dbo.source s",
+        source,
+        target,
+    )
+    assert len(values) == 1
+    assert values[0].source_column_name is None
+    assert values[0].classification is ColumnLineageClassification.EXACT_EXPRESSION
+
+
+def test_case_composes_with_expression_and_scalar_subquery() -> None:
+    source = _table("dbo.source", "flag", "a", "b", "tax")
+    lookup = _table("dbo.lookup", "amount")
+    target = _table("dbo.target", "value")
+    values = _analyze(
+        "INSERT INTO dbo.target(value) SELECT CASE WHEN s.flag=1 THEN "
+        "(SELECT MAX(x.amount) FROM dbo.lookup x) ELSE s.a END + s.tax "
+        "FROM dbo.source s",
+        source,
+        lookup,
+        target,
+    )
+    assert {value.source_qualified_name for value in values} == {
+        "dbo.lookup",
+        "dbo.source",
+    }
+    assert {value.source_column_name for value in values} == {"amount", "a", "tax"}
+
+
+def test_case_value_only_dependencies_propagate_through_cte_and_view() -> None:
+    source = _table("dbo.source", "flag", "a", "b")
+    target = _table("dbo.target", "value")
+    values = _analyze(
+        "WITH cte AS (SELECT CASE WHEN flag=1 THEN a ELSE b END AS value "
+        "FROM dbo.source) INSERT INTO dbo.target(value) SELECT value FROM cte",
+        source,
+        target,
+    )
+    assert {value.source_column_name for value in values} == {"a", "b"}
+
+    view = MetadataObject.create(ObjectType.VIEW, "SQL", "dbo.case_view", "case_view")
+    view.description = (
+        "CREATE VIEW dbo.case_view AS SELECT CASE WHEN flag=1 THEN a ELSE b END "
+        "AS value "
+        "FROM dbo.source"
+    )
+    ColumnLineageAnalyzer().analyze([source, view])
+    assert {value.source_column_name for value in view.column_lineage_candidates} == {
+        "a",
+        "b",
+    }
+
+
+def test_malformed_case_fails_closed() -> None:
+    source = _table("dbo.source", "a", "b")
+    target = _table("dbo.target", "value")
+    values = _analyze(
+        "INSERT INTO dbo.target(value) SELECT CASE WHEN FROM dbo.source",
+        source,
+        target,
+    )
+    assert all(
+        value.classification is ColumnLineageClassification.UNRESOLVED
+        for value in values
+    )
+
+
 def test_update_from_cte_and_derived_table_reuse_transient_outputs() -> None:
     source = _table("dbo.source", "id", "x")
     target = _table("dbo.target", "id", "a")

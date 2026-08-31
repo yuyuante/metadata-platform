@@ -25,6 +25,7 @@ from emip.services.sql_query_lineage import (
     QueryDependency,
     QueryLineageResolver,
     QueryOutput,
+    value_expression_children,
 )
 
 _PHYSICAL_TYPES = {
@@ -657,8 +658,11 @@ class ColumnLineageAnalyzer:
     ) -> QueryOutput:
         if isinstance(expression, exp.Column):
             return self._resolve_dml_column(sources, expression)
+        children = value_expression_children(expression)
+        if children is None:
+            return QueryOutput("?", reason="CASE_STRUCTURE_UNSUPPORTED")
         parts: list[QueryOutput] = []
-        for child in expression.iter_expressions():
+        for child in children:
             if isinstance(child, exp.Subquery) and isinstance(child.this, exp.Query):
                 outputs = resolver.outputs(child.this) if resolver is not None else ()
                 if len(outputs) != 1:

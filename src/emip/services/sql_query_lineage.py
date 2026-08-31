@@ -22,6 +22,36 @@ _MAX_QUERY_SCOPES = 2_048
 _MAX_QUERY_DEPTH = 64
 
 
+def value_expression_children(
+    expression: exp.Expression,
+) -> tuple[exp.Expression, ...] | None:
+    """Return children that produce values, excluding control expressions.
+
+    CASE selectors and WHEN predicates select a branch; they are not value
+    derivation dependencies.  Consumers share this boundary so DML and query
+    projections cannot accidentally reintroduce predicate lineage.
+    """
+
+    if not isinstance(expression, exp.Case):
+        return tuple(expression.iter_expressions())
+    children: list[exp.Expression] = []
+    for branch in expression.args.get("ifs") or ():
+        if not isinstance(branch, exp.If):
+            return None
+        value = branch.args.get("true")
+        if not isinstance(value, exp.Expression):
+            return None
+        children.append(value)
+    default = expression.args.get("default")
+    if default is not None:
+        if not isinstance(default, exp.Expression):
+            return None
+        children.append(default)
+    if not children:
+        return None
+    return tuple(children)
+
+
 @dataclass(frozen=True, slots=True)
 class QueryDependency:
     """One proven physical source-column dependency."""
@@ -231,8 +261,36 @@ class QueryLineageResolver:
         if isinstance(expression, exp.Star):
             return _unresolved("*", "SELECT_STAR_METADATA_UNAVAILABLE")
 
+        # CASE predicates/selectors control branch selection; they do not
+        # contribute value derivation lineage.  Traverse only THEN/ELSE
+        # expressions so predicate columns cannot become false exact edges.
+        if isinstance(expression, exp.Case):
+            children = value_expression_children(expression)
+            if children is None:
+                return _unresolved(
+                    expression.alias_or_name or "?", "CASE_STRUCTURE_UNSUPPORTED"
+                )
+            value_parts = [
+                self._expression_output(scope, value, depth + 1) for value in children
+            ]
+            reason = next(
+                (part.reason for part in value_parts if part.reason is not None), None
+            )
+            if reason is not None:
+                return _unresolved(expression.alias_or_name or "?", reason)
+            return QueryOutput(
+                expression.alias_or_name or "?",
+                _deduplicate_dependencies(
+                    dependency
+                    for part in value_parts
+                    for dependency in part.dependencies
+                ),
+                ColumnLineageClassification.EXACT_EXPRESSION,
+                path=tuple(entry for part in value_parts for entry in part.path),
+            )
+
         parts: list[QueryOutput] = []
-        for child in expression.iter_expressions():
+        for child in value_expression_children(expression) or ():
             if isinstance(child, exp.Subquery) and isinstance(child.this, exp.Query):
                 outputs = self.outputs(child.this)
                 if len(outputs) != 1:

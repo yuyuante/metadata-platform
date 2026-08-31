@@ -91,6 +91,35 @@ def test_update_constant_still_requires_target_column_metadata() -> None:
     assert values[0].unresolved_reason == "TARGET_COLUMN_METADATA_UNAVAILABLE"
 
 
+def test_update_case_excludes_predicate_columns() -> None:
+    source = _table("dbo.source", "flag", "a", "b")
+    target = _table("dbo.target", "value")
+    values = _analyze(
+        _owner(
+            "UPDATE dbo.target t SET value = CASE WHEN s.flag=1 THEN s.a ELSE s.b END "
+            "FROM dbo.source s"
+        ),
+        source,
+        target,
+    )
+    assert {value.source_column_name for value in values} == {"a", "b"}
+
+
+def test_merge_case_excludes_on_and_predicate_columns() -> None:
+    source = _table("dbo.source", "id", "flag", "a", "b")
+    target = _table("dbo.target", "id", "value")
+    values = _analyze(
+        _owner(
+            "MERGE INTO dbo.target t USING dbo.source s ON t.id=s.id "
+            "WHEN MATCHED THEN UPDATE SET t.value = "
+            "CASE WHEN s.flag=1 THEN s.a ELSE s.b END"
+        ),
+        source,
+        target,
+    )
+    assert {value.source_column_name for value in values} == {"a", "b"}
+
+
 def test_update_from_resolves_qualified_alias() -> None:
     source = _table("dbo.source", "x")
     target = _table("dbo.target", "a")
