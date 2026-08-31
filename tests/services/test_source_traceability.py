@@ -62,6 +62,32 @@ def test_source_traceability_does_not_invent_invalid_sql_ranges(
     assert location["warning"] == "Persisted SQL line range is outside the source file."
 
 
+def test_source_traceability_rejects_path_traversal_outside_source_root(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "allowed"
+    source_root.mkdir()
+    secret = tmp_path / "outside.sql"
+    secret.write_text("SELECT 'must not be read';\n", encoding="utf-8")
+    item = _object()
+    item.source_locations = (
+        SourceLocation(
+            object_id=item.object_id,
+            source_root=str(source_root),
+            source_file="../outside.sql",
+            source_type=SourceType.SQL,
+            start_line=1,
+        ),
+    )
+
+    location = SourceTraceabilityService().retrieve(item)["locations"][0]  # type: ignore[index]
+
+    assert location["excerpt"] is None
+    assert location["warning"] == (
+        "Source unavailable: Persisted source path escapes the allowed source root."
+    )
+
+
 def test_source_traceability_returns_unique_xml_context(tmp_path: Path) -> None:
     source = tmp_path / "workflow.xml"
     source.write_text(
