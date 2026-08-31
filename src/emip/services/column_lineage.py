@@ -8,8 +8,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import cast
 
-from sqlglot import TokenType, exp, parse
-from sqlglot.errors import ErrorLevel, ParseError
+from sqlglot import exp, parse
+from sqlglot.errors import ErrorLevel, ParseError, TokenError
 from sqlglot.optimizer.scope import Scope, build_scope
 from sqlglot.tokens import Tokenizer
 
@@ -27,6 +27,8 @@ _PHYSICAL_TYPES = {
     ObjectType.VIEW,
     ObjectType.MATERIALIZED_VIEW,
 }
+_MAX_SQL_CHARACTERS = 4_000_000
+_MAX_AST_NODES = 100_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +38,16 @@ class _SqlInput:
     source_root: str | None
     source_file: str | None
     context: str
+    preferred_systems: tuple[tuple[tuple[str, ...], str | None], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _DmlSource:
+    """One statement-scoped physical relation exposed to a DML expression."""
+
+    alias: str
+    qualified_name: str
+    object: MetadataObject | None
 
 
 class ColumnLineageAnalyzer:
@@ -53,10 +65,11 @@ class ColumnLineageAnalyzer:
                 item.column_lineage_candidates
             )
             for sql_input in self._sql_inputs(item):
+                scoped_catalog = self._scoped_catalog(catalog, sql_input)
                 for expression in self._parse_expressions(sql_input.sql):
                     candidates.extend(
                         self._expression_candidates(
-                            item, expression, sql_input, catalog
+                            item, expression, sql_input, scoped_catalog
                         )
                     )
             item.column_lineage_candidates = tuple(dict.fromkeys(candidates))
@@ -130,6 +143,7 @@ class ColumnLineageAnalyzer:
             },
             key=int,
         )
+        embedded_systems = self._embedded_systems(item, properties, indexes)
         for index in indexes:
             prefix = f"embedded_sql.{index}"
             status = properties.get(f"{prefix}.status", [""])[-1]
@@ -148,20 +162,77 @@ class ColumnLineageAnalyzer:
                     (properties.get(f"{prefix}.source_root") or [""])[-1] or None,
                     (properties.get(f"{prefix}.source_file") or [""])[-1] or None,
                     (properties.get(f"{prefix}.xml_context") or [prefix])[-1],
+                    embedded_systems.get(prefix, ()),
                 )
             )
         return tuple(inputs)
 
+    @staticmethod
+    def _embedded_systems(
+        item: MetadataObject,
+        properties: dict[str, list[str]],
+        indexes: list[str],
+    ) -> dict[str, tuple[tuple[tuple[str, ...], str | None], ...]]:
+        systems: defaultdict[str, defaultdict[tuple[str, ...], set[str]]] = defaultdict(
+            lambda: defaultdict(set)
+        )
+        for candidate in item.relation_candidates:
+            if (
+                candidate.source_type != "INFORMATICA_EMBEDDED_SQL"
+                or candidate.target_system_name is None
+            ):
+                continue
+            prefix = _embedded_fragment_prefix(
+                candidate.evidence_sql, properties, indexes
+            )
+            if prefix is None:
+                continue
+            for key in physical_identity_keys(candidate.target_qualified_name):
+                systems[prefix][key].add(candidate.target_system_name)
+        return {
+            prefix: tuple(
+                (key, next(iter(values)) if len(values) == 1 else None)
+                for key, values in sorted(fragment_systems.items())
+            )
+            for prefix, fragment_systems in systems.items()
+        }
+
+    @staticmethod
+    def _scoped_catalog(
+        catalog: dict[tuple[str, ...], tuple[MetadataObject, ...]],
+        sql_input: _SqlInput,
+    ) -> dict[tuple[str, ...], tuple[MetadataObject, ...]]:
+        if not sql_input.preferred_systems:
+            return catalog
+        preferences = dict(sql_input.preferred_systems)
+        return {
+            key: tuple(
+                value
+                for value in values
+                if key not in preferences
+                or (
+                    preferences[key] is not None
+                    and value.system_name == preferences[key]
+                )
+            )
+            for key, values in catalog.items()
+        }
+
     def _parse_expressions(self, sql: str) -> tuple[exp.Expression, ...]:
+        if len(sql) > _MAX_SQL_CHARACTERS:
+            return ()
         parsed: list[exp.Expression] = []
         try:
             expressions = parse(sql, read="postgres", error_level=ErrorLevel.RAISE)
-        except ParseError:
+        except (ParseError, RecursionError, TokenError):
             return ()
         for expression in expressions:
             if expression is None:
                 continue
-            parsed.append(cast(exp.Expression, expression))
+            typed_expression = cast(exp.Expression, expression)
+            if sum(1 for _ in typed_expression.walk()) > _MAX_AST_NODES:
+                continue
+            parsed.append(typed_expression)
             body = expression.args.get("expression")
             if isinstance(body, exp.Heredoc):
                 parsed.extend(self._parse_procedural_body(str(body.this)))
@@ -171,30 +242,32 @@ class ColumnLineageAnalyzer:
         """Parse DML slices found by SQL tokens inside a procedural body."""
 
         parsed: list[exp.Expression] = []
-        for fragment in body.split(";"):
-            tokens = Tokenizer(dialect="postgres").tokenize(fragment)
-            start = next(
-                (
-                    token.start
-                    for token in tokens
-                    if token.token_type is TokenType.INSERT
-                ),
-                None,
-            )
+        fragments = _split_procedural_statements(body)
+        if fragments is None:
+            return parsed
+        for fragment in fragments:
+            start = _first_procedural_dml_start(fragment)
             if start is None:
                 continue
             try:
-                parsed.extend(
-                    cast(exp.Expression, expression)
-                    for expression in parse(
-                        fragment[start:],
-                        read="postgres",
-                        error_level=ErrorLevel.RAISE,
-                    )
-                    if expression is not None
-                )
-            except ParseError:
+                Tokenizer(dialect="postgres").tokenize(fragment[start:])
+            except (RecursionError, TokenError):
                 continue
+            try:
+                expressions = parse(
+                    fragment[start:],
+                    read="postgres",
+                    error_level=ErrorLevel.RAISE,
+                )
+            except (ParseError, RecursionError, TokenError):
+                continue
+            for expression in expressions:
+                if expression is None:
+                    continue
+                typed_expression = cast(exp.Expression, expression)
+                if sum(1 for _ in typed_expression.walk()) > _MAX_AST_NODES:
+                    continue
+                parsed.append(typed_expression)
         return parsed
 
     def _expression_candidates(
@@ -208,11 +281,384 @@ class ColumnLineageAnalyzer:
             kind = str(expression.args.get("kind", "")).upper()
             if kind in {"VIEW", "MATERIALIZED VIEW"}:
                 return self._view_candidates(owner, expression, sql_input, catalog)
-        return [
-            candidate
-            for insert in expression.find_all(exp.Insert)
-            for candidate in self._insert_candidates(owner, insert, sql_input, catalog)
+        if isinstance(expression, exp.Merge):
+            return self._merge_candidates(owner, expression, sql_input, catalog)
+        if isinstance(expression, exp.Update):
+            return self._update_candidates(owner, expression, sql_input, catalog)
+        if isinstance(expression, exp.Insert):
+            return self._insert_candidates(owner, expression, sql_input, catalog)
+        if isinstance(expression, exp.Delete):
+            return []
+        candidates: list[ColumnLineageCandidate] = []
+        for node in expression.walk():
+            if isinstance(node, exp.Merge) and node.find_ancestor(exp.Merge) is None:
+                candidates.extend(
+                    self._merge_candidates(owner, node, sql_input, catalog)
+                )
+            elif isinstance(node, exp.Insert) and node.find_ancestor(exp.Merge) is None:
+                candidates.extend(
+                    self._insert_candidates(owner, node, sql_input, catalog)
+                )
+            elif isinstance(node, exp.Update) and node.find_ancestor(exp.Merge) is None:
+                candidates.extend(
+                    self._update_candidates(owner, node, sql_input, catalog)
+                )
+        return candidates
+
+    def _update_candidates(
+        self,
+        owner: MetadataObject,
+        update: exp.Update,
+        sql_input: _SqlInput,
+        catalog: dict[tuple[str, ...], tuple[MetadataObject, ...]],
+    ) -> list[ColumnLineageCandidate]:
+        relation_tables = _update_relation_tables(update)
+        target_table = _update_target_table(update, relation_tables)
+        if target_table is None:
+            return []
+        target_name = _table_name(target_table)
+        target_object = _unique_object(target_name, catalog)
+        sources = self._dml_sources(relation_tables, catalog)
+        if not any(
+            value.alias.casefold() == target_table.alias_or_name.casefold()
+            for value in sources
+        ):
+            sources.insert(
+                0,
+                _DmlSource(
+                    target_table.alias_or_name,
+                    target_name,
+                    target_object,
+                ),
+            )
+        assignments = [
+            (assignment.this, assignment.expression)
+            for assignment in update.expressions
+            if isinstance(assignment, exp.EQ)
+            and isinstance(assignment.this, exp.Column)
+            and isinstance(assignment.expression, exp.Expression)
         ]
+        return self._assignment_candidates(
+            owner,
+            target_name,
+            target_object,
+            target_table.alias_or_name,
+            assignments,
+            sources,
+            update.sql(),
+            update.sql(),
+            sql_input,
+            operation="UPDATE",
+        )
+
+    def _merge_candidates(
+        self,
+        owner: MetadataObject,
+        merge: exp.Merge,
+        sql_input: _SqlInput,
+        catalog: dict[tuple[str, ...], tuple[MetadataObject, ...]],
+    ) -> list[ColumnLineageCandidate]:
+        if not isinstance(merge.this, exp.Table):
+            return []
+        target_table = merge.this
+        target_name = _table_name(target_table)
+        target_object = _unique_object(target_name, catalog)
+        relation_tables = [target_table, *_relation_tables(merge.args.get("using"))]
+        sources = self._dml_sources(relation_tables, catalog)
+        whens = merge.args.get("whens")
+        if not isinstance(whens, exp.Whens):
+            return []
+        candidates: list[ColumnLineageCandidate] = []
+        for index, branch in enumerate(whens.expressions, 1):
+            if not isinstance(branch, exp.When):
+                continue
+            action = branch.args.get("then")
+            branch_name = _merge_branch_name(branch, action, index)
+            branch_condition = (
+                branch.args["condition"].sql()
+                if isinstance(branch.args.get("condition"), exp.Expression)
+                else None
+            )
+            if isinstance(action, exp.Update) and bool(branch.args.get("matched")):
+                assignments = [
+                    (assignment.this, assignment.expression)
+                    for assignment in action.expressions
+                    if isinstance(assignment, exp.EQ)
+                    and isinstance(assignment.this, exp.Column)
+                    and isinstance(assignment.expression, exp.Expression)
+                ]
+                candidates.extend(
+                    self._assignment_candidates(
+                        owner,
+                        target_name,
+                        target_object,
+                        target_table.alias_or_name,
+                        assignments,
+                        sources,
+                        merge.sql(),
+                        action.sql(),
+                        sql_input,
+                        operation="MERGE",
+                        branch=branch_name,
+                        branch_condition=branch_condition,
+                    )
+                )
+            elif (
+                isinstance(action, exp.Insert)
+                and not bool(branch.args.get("matched"))
+                and not bool(branch.args.get("source"))
+            ):
+                candidates.extend(
+                    self._merge_insert_candidates(
+                        owner,
+                        target_name,
+                        target_object,
+                        target_table.alias_or_name,
+                        action,
+                        sources,
+                        merge.sql(),
+                        sql_input,
+                        branch_name,
+                        branch_condition,
+                    )
+                )
+        return candidates
+
+    def _merge_insert_candidates(
+        self,
+        owner: MetadataObject,
+        target_name: str,
+        target_object: MetadataObject | None,
+        target_alias: str,
+        insert: exp.Insert,
+        sources: list[_DmlSource],
+        statement_sql: str,
+        sql_input: _SqlInput,
+        branch: str,
+        branch_condition: str | None,
+    ) -> list[ColumnLineageCandidate]:
+        target_values = insert.this
+        source_values = insert.expression
+        if not isinstance(target_values, exp.Tuple) or not isinstance(
+            source_values, exp.Tuple
+        ):
+            return []
+        target_columns = [
+            value
+            for value in target_values.expressions
+            if isinstance(value, exp.Column)
+        ]
+        expressions = list(source_values.expressions)
+        if len(target_columns) != len(target_values.expressions) or len(
+            target_columns
+        ) != len(expressions):
+            names = [value.name for value in target_columns] or ["?"]
+            return [
+                self._unresolved(
+                    owner,
+                    target_name,
+                    name,
+                    source_values.sql(),
+                    statement_sql,
+                    sql_input,
+                    "TARGET_VALUE_COUNT_MISMATCH",
+                    operation="MERGE",
+                    branch=branch,
+                    branch_condition=branch_condition,
+                )
+                for name in names
+            ]
+        return self._assignment_candidates(
+            owner,
+            target_name,
+            target_object,
+            target_alias,
+            list(zip(target_columns, expressions, strict=True)),
+            sources,
+            statement_sql,
+            insert.sql(),
+            sql_input,
+            operation="MERGE",
+            branch=branch,
+            branch_condition=branch_condition,
+        )
+
+    def _assignment_candidates(
+        self,
+        owner: MetadataObject,
+        target_name: str,
+        target_object: MetadataObject | None,
+        target_alias: str,
+        assignments: list[tuple[exp.Column, exp.Expression]],
+        sources: list[_DmlSource],
+        statement_sql: str,
+        query_sql: str,
+        sql_input: _SqlInput,
+        *,
+        operation: str,
+        branch: str | None = None,
+        branch_condition: str | None = None,
+    ) -> list[ColumnLineageCandidate]:
+        candidates: list[ColumnLineageCandidate] = []
+        for target_column, expression in assignments:
+            column_name = target_column.name
+            reason: str | None
+            if target_column.table and (
+                target_column.table.casefold() != target_alias.casefold()
+                and target_column.table.casefold()
+                != target_name.rsplit(".", 1)[-1].casefold()
+            ):
+                reason = "TARGET_OBJECT_UNRESOLVED"
+            else:
+                reason = _target_column_reason(target_object, column_name)
+            if reason is not None:
+                candidates.append(
+                    self._unresolved(
+                        owner,
+                        target_name,
+                        column_name,
+                        expression.sql(),
+                        statement_sql,
+                        sql_input,
+                        reason,
+                        target_system_name=(
+                            target_object.system_name if target_object else None
+                        ),
+                        operation=operation,
+                        branch=branch,
+                        branch_condition=branch_condition,
+                    )
+                )
+                continue
+            if target_object is None:  # Defensive narrowing after conservative proof.
+                continue
+            dependencies: list[tuple[MetadataObject, str]] = []
+            dependency_reason: str | None = None
+            for column in expression.find_all(exp.Column):
+                dependency, dependency_reason = self._resolve_dml_column(
+                    sources, column
+                )
+                if dependency is None:
+                    break
+                dependencies.append(dependency)
+            if dependency_reason is not None:
+                candidates.append(
+                    self._unresolved(
+                        owner,
+                        target_name,
+                        column_name,
+                        expression.sql(),
+                        statement_sql,
+                        sql_input,
+                        dependency_reason,
+                        target_system_name=target_object.system_name,
+                        operation=operation,
+                        branch=branch,
+                        branch_condition=branch_condition,
+                    )
+                )
+                continue
+            classification = (
+                ColumnLineageClassification.EXACT_DIRECT
+                if isinstance(expression, exp.Column) and len(dependencies) == 1
+                else ColumnLineageClassification.EXACT_EXPRESSION
+            )
+            dependency_values: list[tuple[MetadataObject | None, str | None]] = []
+            seen_dependencies: set[tuple[object, str]] = set()
+            for dependency_object, dependency_column in dependencies:
+                dependency_key = (
+                    dependency_object.object_id,
+                    dependency_column.casefold(),
+                )
+                if dependency_key not in seen_dependencies:
+                    seen_dependencies.add(dependency_key)
+                    dependency_values.append((dependency_object, dependency_column))
+            if not dependency_values:
+                dependency_values.append((None, None))
+            for source_object, source_column in dependency_values:
+                candidates.append(
+                    ColumnLineageCandidate(
+                        target_qualified_name=target_object.qualified_name,
+                        target_column_name=column_name,
+                        classification=classification,
+                        expression=expression.sql(),
+                        statement_sql=statement_sql,
+                        source_type=sql_input.source_type,
+                        source_root=sql_input.source_root,
+                        source_file=sql_input.source_file,
+                        source_object=owner.qualified_name,
+                        evidence=self._evidence(
+                            sql_input,
+                            query_sql,
+                            operation=operation,
+                            branch=branch,
+                            branch_condition=branch_condition,
+                        ),
+                        target_system_name=target_object.system_name,
+                        source_qualified_name=(
+                            source_object.qualified_name if source_object else None
+                        ),
+                        source_column_name=source_column,
+                        source_system_name=(
+                            source_object.system_name if source_object else None
+                        ),
+                    )
+                )
+        return candidates
+
+    @staticmethod
+    def _dml_sources(
+        tables: list[exp.Table],
+        catalog: dict[tuple[str, ...], tuple[MetadataObject, ...]],
+    ) -> list[_DmlSource]:
+        result: list[_DmlSource] = []
+        seen: set[tuple[str, str]] = set()
+        for table in tables:
+            name = _table_name(table)
+            alias = table.alias_or_name
+            key = (alias.casefold(), name.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(_DmlSource(alias, name, _unique_object(name, catalog)))
+        return result
+
+    @staticmethod
+    def _resolve_dml_column(
+        sources: list[_DmlSource], column: exp.Column
+    ) -> tuple[tuple[MetadataObject, str] | None, str | None]:
+        if column.table:
+            matches = [
+                source
+                for source in sources
+                if source.alias.casefold() == column.table.casefold()
+                or source.qualified_name.casefold() == column.table.casefold()
+            ]
+            if len(matches) != 1 or matches[0].object is None:
+                return None, "SOURCE_OBJECT_UNRESOLVED"
+            source = matches[0].object
+            if not source.columns:
+                return None, "SOURCE_COLUMN_METADATA_UNAVAILABLE"
+            if not _has_column(source, column.name):
+                return None, "SOURCE_COLUMN_UNAVAILABLE"
+            return (source, column.name), None
+        distinct = {
+            source.object.object_id: source.object
+            for source in sources
+            if source.object is not None
+        }
+        if any(source.object is None for source in sources):
+            return None, "SOURCE_OBJECT_UNRESOLVED"
+        if any(not source.columns for source in distinct.values()):
+            return None, "SOURCE_COLUMN_METADATA_UNAVAILABLE"
+        owners = [
+            source for source in distinct.values() if _has_column(source, column.name)
+        ]
+        if not owners:
+            return None, "SOURCE_COLUMN_UNAVAILABLE"
+        if len(owners) != 1:
+            return None, "SOURCE_COLUMN_AMBIGUOUS"
+        return (owners[0], column.name), None
 
     def _view_candidates(
         self,
@@ -411,19 +857,28 @@ class ColumnLineageAnalyzer:
         if scope is None:
             return []
         candidates: list[ColumnLineageCandidate] = []
-        available_target_columns = (
-            {column.column_name.casefold() for column in target_object.columns}
-            if target_object.columns
-            else None
-        )
+        available_target_columns = {
+            column.column_name.casefold() for column in target_object.columns
+        }
         for target_column, projection in zip(target_columns, projections, strict=True):
             expression = (
                 projection.this if isinstance(projection, exp.Alias) else projection
             )
-            if (
-                available_target_columns is not None
-                and target_column.casefold() not in available_target_columns
-            ):
+            if not available_target_columns:
+                candidates.append(
+                    self._unresolved(
+                        owner,
+                        target_name,
+                        target_column,
+                        expression.sql(),
+                        statement_sql,
+                        sql_input,
+                        "TARGET_COLUMN_METADATA_UNAVAILABLE",
+                        target_system_name=target_system_name,
+                    )
+                )
+                continue
+            if target_column.casefold() not in available_target_columns:
                 candidates.append(
                     self._unresolved(
                         owner,
@@ -433,6 +888,7 @@ class ColumnLineageAnalyzer:
                         statement_sql,
                         sql_input,
                         "TARGET_COLUMN_UNAVAILABLE",
+                        target_system_name=target_system_name,
                     )
                 )
                 continue
@@ -544,9 +1000,23 @@ class ColumnLineageAnalyzer:
         return result
 
     @staticmethod
-    def _evidence(sql_input: _SqlInput, query: str) -> str:
+    def _evidence(
+        sql_input: _SqlInput,
+        query: str,
+        *,
+        operation: str | None = None,
+        branch: str | None = None,
+        branch_condition: str | None = None,
+    ) -> str:
+        value: dict[str, str] = {"context": sql_input.context, "query": query}
+        if operation is not None:
+            value["operation"] = operation
+        if branch is not None:
+            value["branch"] = branch
+        if branch_condition is not None:
+            value["branch_condition"] = branch_condition
         return json.dumps(
-            {"context": sql_input.context, "query": query},
+            value,
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -560,6 +1030,11 @@ class ColumnLineageAnalyzer:
         statement_sql: str,
         sql_input: _SqlInput,
         reason: str,
+        *,
+        target_system_name: str | None = None,
+        operation: str | None = None,
+        branch: str | None = None,
+        branch_condition: str | None = None,
     ) -> ColumnLineageCandidate:
         return ColumnLineageCandidate(
             target_qualified_name=target_name,
@@ -571,9 +1046,239 @@ class ColumnLineageAnalyzer:
             source_root=sql_input.source_root,
             source_file=sql_input.source_file,
             source_object=owner.qualified_name,
-            evidence=self._evidence(sql_input, statement_sql),
+            evidence=self._evidence(
+                sql_input,
+                statement_sql,
+                operation=operation,
+                branch=branch,
+                branch_condition=branch_condition,
+            ),
+            target_system_name=target_system_name,
             unresolved_reason=reason,
         )
+
+
+def _embedded_fragment_prefix(
+    raw_evidence: str,
+    properties: dict[str, list[str]],
+    indexes: list[str],
+) -> str | None:
+    """Associate provider evidence with one embedded SQL fragment only."""
+
+    if len(indexes) == 1:
+        # Existing persisted candidates may predate structured fragment evidence.
+        return f"embedded_sql.{indexes[0]}"
+    try:
+        evidence = json.loads(raw_evidence)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(evidence, dict):
+        return None
+
+    xml_context = evidence.get("xml_context")
+    if isinstance(xml_context, str) and xml_context:
+        matches = [
+            f"embedded_sql.{index}"
+            for index in indexes
+            if xml_context in properties.get(f"embedded_sql.{index}.xml_context", [])
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    matches = []
+    for index in indexes:
+        candidate_prefix = f"embedded_sql.{index}"
+        if _embedded_fragment_evidence_matches(evidence, properties, candidate_prefix):
+            matches.append(candidate_prefix)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _embedded_fragment_evidence_matches(
+    evidence: dict[object, object],
+    properties: dict[str, list[str]],
+    prefix: str,
+) -> bool:
+    compared = False
+    for evidence_name, property_name in (
+        ("raw_sql", "raw_sql"),
+        ("resolved_sql", "resolved_sql"),
+        ("property", "property"),
+        ("source_file", "source_file"),
+        ("source_root", "source_root"),
+        ("role", "role"),
+    ):
+        value = evidence.get(evidence_name)
+        expected = properties.get(f"{prefix}.{property_name}", [])
+        if value is None or not expected:
+            continue
+        compared = True
+        if not isinstance(value, str) or value not in expected:
+            return False
+    return compared
+
+
+def _split_procedural_statements(body: str) -> tuple[str, ...] | None:
+    """Split procedural text at lexically safe semicolons in one O(n) scan."""
+
+    statements: list[str] = []
+    start = 0
+    index = 0
+    state = "NORMAL"
+    block_depth = 0
+    dollar_delimiter = ""
+    while index < len(body):
+        char = body[index]
+        following = body[index + 1] if index + 1 < len(body) else ""
+        if state == "NORMAL":
+            if char == "'":
+                state = "SINGLE_QUOTE"
+            elif char == '"':
+                state = "DOUBLE_QUOTE"
+            elif char == "-" and following == "-":
+                state = "LINE_COMMENT"
+                index += 1
+            elif char == "/" and following == "*":
+                state = "BLOCK_COMMENT"
+                block_depth = 1
+                index += 1
+            elif char == "$":
+                delimiter = _dollar_quote_delimiter(body, index)
+                if delimiter is not None:
+                    state = "DOLLAR_QUOTE"
+                    dollar_delimiter = delimiter
+                    index += len(delimiter) - 1
+            elif char == ";":
+                fragment = body[start:index]
+                if fragment.strip():
+                    statements.append(fragment)
+                start = index + 1
+        elif state == "SINGLE_QUOTE":
+            if char == "\\":
+                index += 1
+            elif char == "'" and following == "'":
+                index += 1
+            elif char == "'":
+                state = "NORMAL"
+        elif state == "DOUBLE_QUOTE":
+            if char == '"' and following == '"':
+                index += 1
+            elif char == '"':
+                state = "NORMAL"
+        elif state == "LINE_COMMENT":
+            if char in "\r\n":
+                state = "NORMAL"
+        elif state == "BLOCK_COMMENT":
+            if char == "/" and following == "*":
+                block_depth += 1
+                index += 1
+            elif char == "*" and following == "/":
+                block_depth -= 1
+                index += 1
+                if block_depth == 0:
+                    state = "NORMAL"
+        elif body.startswith(dollar_delimiter, index):
+            index += len(dollar_delimiter) - 1
+            state = "NORMAL"
+            dollar_delimiter = ""
+        index += 1
+
+    if state not in {"NORMAL", "LINE_COMMENT"}:
+        return None
+    fragment = body[start:]
+    if fragment.strip():
+        statements.append(fragment)
+    return tuple(statements)
+
+
+def _dollar_quote_delimiter(body: str, start: int) -> str | None:
+    """Return a valid, bounded PostgreSQL dollar-quote opener at ``start``."""
+
+    end = start + 1
+    if end >= len(body):
+        return None
+    if body[end] == "$":
+        return "$$"
+    if not (body[end].isalpha() or body[end] == "_"):
+        return None
+    end += 1
+    while end < len(body) and (body[end].isalnum() or body[end] == "_"):
+        end += 1
+    if end >= len(body) or body[end] != "$":
+        return None
+    return body[start : end + 1]
+
+
+def _first_procedural_dml_start(fragment: str) -> int | None:
+    """Find an executable DML keyword without inspecting inert lexical text."""
+
+    index = 0
+    state = "NORMAL"
+    block_depth = 0
+    dollar_delimiter = ""
+    while index < len(fragment):
+        char = fragment[index]
+        following = fragment[index + 1] if index + 1 < len(fragment) else ""
+        if state == "NORMAL":
+            if char == "'":
+                state = "SINGLE_QUOTE"
+            elif char == '"':
+                state = "DOUBLE_QUOTE"
+            elif char == "-" and following == "-":
+                state = "LINE_COMMENT"
+                index += 1
+            elif char == "/" and following == "*":
+                state = "BLOCK_COMMENT"
+                block_depth = 1
+                index += 1
+            elif char == "$":
+                delimiter = _dollar_quote_delimiter(fragment, index)
+                if delimiter is not None:
+                    state = "DOLLAR_QUOTE"
+                    dollar_delimiter = delimiter
+                    index += len(delimiter) - 1
+            elif char.isalpha() or char == "_":
+                end = index + 1
+                while end < len(fragment) and (
+                    fragment[end].isalnum() or fragment[end] in {"_", "$"}
+                ):
+                    end += 1
+                if fragment[index:end].upper() in {
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "MERGE",
+                }:
+                    return index
+                index = end - 1
+        elif state == "SINGLE_QUOTE":
+            if char == "\\":
+                index += 1
+            elif char == "'" and following == "'":
+                index += 1
+            elif char == "'":
+                state = "NORMAL"
+        elif state == "DOUBLE_QUOTE":
+            if char == '"' and following == '"':
+                index += 1
+            elif char == '"':
+                state = "NORMAL"
+        elif state == "LINE_COMMENT":
+            if char in "\r\n":
+                state = "NORMAL"
+        elif state == "BLOCK_COMMENT":
+            if char == "/" and following == "*":
+                block_depth += 1
+                index += 1
+            elif char == "*" and following == "/":
+                block_depth -= 1
+                index += 1
+                if block_depth == 0:
+                    state = "NORMAL"
+        elif fragment.startswith(dollar_delimiter, index):
+            index += len(dollar_delimiter) - 1
+            state = "NORMAL"
+            dollar_delimiter = ""
+        index += 1
+    return None
 
 
 def _unique_object(
@@ -593,6 +1298,87 @@ def _unique_object(
 
 def _table_name(table: exp.Table) -> str:
     return ".".join(part.name for part in table.parts if part.name)
+
+
+def _has_column(item: MetadataObject, column_name: str) -> bool:
+    return any(
+        column.column_name.casefold() == column_name.casefold()
+        for column in item.columns
+    )
+
+
+def _target_column_reason(
+    target: MetadataObject | None, column_name: str
+) -> str | None:
+    if target is None:
+        return "TARGET_OBJECT_UNRESOLVED"
+    if not target.columns:
+        return "TARGET_COLUMN_METADATA_UNAVAILABLE"
+    if not _has_column(target, column_name):
+        return "TARGET_COLUMN_UNAVAILABLE"
+    return None
+
+
+def _relation_tables(value: object) -> list[exp.Table]:
+    """Return direct relation tables without descending into derived queries."""
+
+    if isinstance(value, exp.Table):
+        tables = [value]
+        for join in value.args.get("joins") or []:
+            if isinstance(join, exp.Join):
+                tables.extend(_relation_tables(join.this))
+        return tables
+    if isinstance(value, exp.From):
+        tables = _relation_tables(value.this)
+        for relation in value.expressions:
+            tables.extend(_relation_tables(relation))
+        return tables
+    if isinstance(value, exp.Join):
+        return _relation_tables(value.this)
+    if isinstance(value, list):
+        return [table for relation in value for table in _relation_tables(relation)]
+    return []
+
+
+def _update_relation_tables(update: exp.Update) -> list[exp.Table]:
+    return _relation_tables(update.args.get("from_"))
+
+
+def _update_target_table(
+    update: exp.Update, relation_tables: list[exp.Table]
+) -> exp.Table | None:
+    target = update.this
+    if not isinstance(target, exp.Table):
+        return None
+    target_name = _table_name(target)
+    if len(target.parts) > 1:
+        return target
+    alias_matches = [
+        table
+        for table in relation_tables
+        if table.alias_or_name.casefold() == target_name.casefold()
+    ]
+    return alias_matches[0] if len(alias_matches) == 1 else target
+
+
+def _merge_branch_name(branch: exp.When, action: object, index: int) -> str:
+    matched = bool(branch.args.get("matched"))
+    source = bool(branch.args.get("source"))
+    if matched:
+        prefix = "MATCHED"
+    elif source:
+        prefix = "NOT_MATCHED_BY_SOURCE"
+    else:
+        prefix = "NOT_MATCHED"
+    if isinstance(action, exp.Update):
+        suffix = "UPDATE"
+    elif isinstance(action, exp.Insert):
+        suffix = "INSERT"
+    elif isinstance(action, exp.Delete):
+        suffix = "DELETE"
+    else:
+        suffix = "UNSUPPORTED"
+    return f"{prefix}_{suffix}[{index}]"
 
 
 def _text(value: object) -> str | None:

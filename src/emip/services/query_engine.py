@@ -104,8 +104,8 @@ def _connection_property_value(item: MetadataObject) -> str | None:
     return None
 
 
-def _informatica_evidence(value: str) -> dict[str, object]:
-    """Expose persisted Informatica context without reparsing source XML."""
+def _structured_evidence(value: str) -> dict[str, object]:
+    """Expose persisted structured context without reparsing source input."""
 
     try:
         parsed = json.loads(value)
@@ -332,8 +332,15 @@ class QueryEngine:
                 "evidence": lineage.evidence,
                 "unresolved_reason": lineage.unresolved_reason,
             }
+            structured_evidence = _structured_evidence(lineage.evidence)
             if lineage.source_type == "INFORMATICA_PORT_LINEAGE":
-                result["informatica"] = _informatica_evidence(lineage.evidence)
+                result["informatica"] = structured_evidence
+            if structured_evidence.get("operation") in {"UPDATE", "MERGE"}:
+                result["dml"] = {
+                    key: structured_evidence[key]
+                    for key in ("operation", "branch", "branch_condition")
+                    if key in structured_evidence
+                }
             return result
 
         incoming = [
