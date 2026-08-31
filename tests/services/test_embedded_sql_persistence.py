@@ -5,6 +5,7 @@ from typing import cast
 from uuid import UUID, uuid5
 
 from emip.domain import (
+    Column,
     ColumnLineage,
     ColumnLineageCandidate,
     ColumnLineageClassification,
@@ -206,6 +207,74 @@ def test_column_lineage_parser_integration_persistence_reload_query_round_trip(
     }
     assert all(value["statement_sql"] for value in incoming)
     assert all(value["evidence"] for value in incoming)
+
+
+def test_informatica_port_lineage_is_idempotent_and_survives_detached_query(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "informatica-port-lineage.xml"
+    path.write_text(
+        """<POWERMART><REPOSITORY><FOLDER NAME="F">
+<SOURCE NAME="SRC" OWNERNAME="dbo"><SOURCEFIELD NAME="A" /></SOURCE>
+<TARGET NAME="TGT" OWNERNAME="dbo"><TARGETFIELD NAME="X" /></TARGET>
+<MAPPING NAME="M">
+<TRANSFORMATION NAME="EXP" TYPE="Expression">
+<TRANSFORMFIELD NAME="A" PORTTYPE="INPUT" />
+<TRANSFORMFIELD NAME="OUT" PORTTYPE="OUTPUT" EXPRESSION="A + 1" />
+</TRANSFORMATION>
+<INSTANCE NAME="SRC_I" TRANSFORMATION_NAME="SRC"
+ TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE" />
+<INSTANCE NAME="EXP_I" TRANSFORMATION_NAME="EXP"
+ TRANSFORMATION_TYPE="Expression" TYPE="TRANSFORMATION" />
+<INSTANCE NAME="TGT_I" TRANSFORMATION_NAME="TGT"
+ TRANSFORMATION_TYPE="Target Definition" TYPE="TARGET" />
+<CONNECTOR FROMINSTANCE="SRC_I" FROMFIELD="A"
+ TOINSTANCE="EXP_I" TOFIELD="A" />
+<CONNECTOR FROMINSTANCE="EXP_I" FROMFIELD="OUT"
+ TOINSTANCE="TGT_I" TOFIELD="X" />
+</MAPPING></FOLDER></REPOSITORY></POWERMART>""",
+        encoding="utf-8",
+    )
+    source = MetadataObject.create(
+        ObjectType.TABLE,
+        "DB",
+        "dbo.SRC",
+        "SRC",
+        columns=(Column(column_name="A", ordinal_position=1),),
+    )
+    target = MetadataObject.create(
+        ObjectType.TABLE,
+        "DB",
+        "dbo.TGT",
+        "TGT",
+        columns=(Column(column_name="X", ordinal_position=1),),
+    )
+    parsed = InformaticaMetadataParser().parse(path)
+    integrated = MetadataIntegrationService().integrate((source, target, *parsed))
+    repository = RoundTripRepository()
+    persister = MetadataObjectPersister(cast(MetadataRepository, repository))
+
+    first = persister.persist(integrated.objects)
+    lineage_count = len(repository.column_lineage)
+    second = persister.persist(integrated.objects)
+    detached = QueryEngine(cast(QueryRepository, repository)).column_lineage("dbo.TGT")
+
+    assert first.objects_created == len(integrated.objects)
+    assert second.objects_created == 0
+    assert lineage_count == 1
+    assert len(repository.column_lineage) == lineage_count
+    incoming = detached["incoming"]
+    assert isinstance(incoming, list)
+    assert len(incoming) == 1
+    assert incoming[0]["classification"] == "EXACT_EXPRESSION"
+    assert incoming[0]["source_qualified_name"] == "dbo.SRC"
+    assert incoming[0]["source_column_name"] == "A"
+    assert incoming[0]["target_column_name"] == "X"
+    assert incoming[0]["source_type"] == "INFORMATICA_PORT_LINEAGE"
+    assert "EXP_I" in incoming[0]["statement_sql"]
+    assert "informatica_port_lineage" in incoming[0]["evidence"]
+    assert incoming[0]["informatica"]["mapping"].endswith("::M")
+    assert any("::EXP_I::OUT" in part for part in incoming[0]["informatica"]["path"])
 
 
 def test_unresolved_target_lineage_survives_detached_reload_and_query(

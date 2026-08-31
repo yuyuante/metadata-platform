@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict, deque
 from collections.abc import Iterator, Mapping, Sequence
 from fnmatch import fnmatchcase
@@ -101,6 +102,16 @@ def _connection_property_value(item: MetadataObject) -> str | None:
         if key in connection_keys and prop.property_value:
             return prop.property_value
     return None
+
+
+def _informatica_evidence(value: str) -> dict[str, object]:
+    """Expose persisted Informatica context without reparsing source XML."""
+
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class QueryEngine:
@@ -289,7 +300,7 @@ class QueryEngine:
                 if lineage.target_object_id is not None
                 else None
             )
-            return {
+            result: dict[str, object] = {
                 "lineage_id": str(lineage.lineage_id),
                 "classification": lineage.classification.value,
                 "source_object_id": (
@@ -321,6 +332,9 @@ class QueryEngine:
                 "evidence": lineage.evidence,
                 "unresolved_reason": lineage.unresolved_reason,
             }
+            if lineage.source_type == "INFORMATICA_PORT_LINEAGE":
+                result["informatica"] = _informatica_evidence(lineage.evidence)
+            return result
 
         incoming = [
             serialize(lineage)
