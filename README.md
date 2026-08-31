@@ -486,6 +486,26 @@ uv run black --check .
 uv run mypy src
 ```
 
+## Engineering Governance
+
+GitHub Issues are the authoritative feature specifications. Repository policy is
+defined by [Shift-Left Security](SECURITY_BASELINE.md),
+[Production Compatibility](PRODUCTION_COMPATIBILITY.md),
+[AI and Codex Engineering Rules](AI_ENGINEERING_RULES.md), and the
+[Continuous Evaluation Catalog](EVALS.md). Resource-safe development rules remain in
+[CODEX_RESOURCE_RULES.md](CODEX_RESOURCE_RULES.md).
+
+Run the lightweight policy and historical-regression gates with:
+
+```powershell
+uv run python scripts/check_governance.py
+uv run python scripts/run_evals.py
+```
+
+All five PR verdict dimensions—correctness, regression, performance, production
+compatibility, and Shift-Left Security—must pass. Independent ChatGPT review and human
+merge approval remain mandatory.
+
 ## Current Status / 目前狀態
 
 The project currently has production SQL/Informatica scanning, canonical object identity, cross-provider integration, repository graph queries, bounded Data Flow, source traceability, deterministic source retrieval, scan profiling/performance optimization, and an in-progress Static Developer Web v1.

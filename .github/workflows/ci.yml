@@ -26,5 +26,9 @@ jobs:
         run: uv run black --check .
       - name: Run MyPy
         run: uv run mypy src
+      - name: Enforce engineering governance
+        run: uv run python scripts/check_governance.py
+      - name: Run continuous evals
+        run: uv run python scripts/run_evals.py
       - name: Run pytest
         run: uv run pytest

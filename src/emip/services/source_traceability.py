@@ -85,12 +85,10 @@ class SourceTraceabilityService:
     def _excerpt(
         self, location: SourceLocation, object_type: ObjectType
     ) -> SourceExcerpt:
-        path = Path(location.source_file)
-        if not path.is_absolute():
-            path = Path(location.source_root) / path
         excerpt: str | None = None
         warning: str | None = None
         try:
+            path = _contained_source_path(location.source_root, location.source_file)
             text = self._reader.read(path)
             if location.source_type is SourceType.SQL:
                 if location.start_line is None:
@@ -191,6 +189,19 @@ class SourceTraceabilityService:
             if len(self._xml_indexes) > 8:
                 self._xml_indexes.popitem(last=False)
             return index
+
+
+def _contained_source_path(source_root: str, source_file: str) -> Path:
+    """Resolve a persisted source path without allowing it to escape its root."""
+
+    root = Path(source_root).resolve()
+    candidate = Path(source_file)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(root):
+        raise OSError("Persisted source path escapes the allowed source root.")
+    return resolved
 
 
 def _tag(element: ElementTree.Element) -> str:

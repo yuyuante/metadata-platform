@@ -1,7 +1,25 @@
 from pathlib import Path
+from xml.etree import ElementTree
+
+import pytest
 
 from emip.domain import ObjectType, RelationType
 from emip.parser.informatica.xml_parser import InformaticaMetadataParser
+
+
+def test_parser_does_not_resolve_external_xml_entities(tmp_path: Path) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("must-not-be-expanded", encoding="utf-8")
+    path = tmp_path / "hostile.xml"
+    path.write_text(
+        '<!DOCTYPE POWERMART [<!ENTITY xxe SYSTEM "'
+        + secret.as_uri()
+        + '">]><POWERMART><REPOSITORY NAME="&xxe;" /></POWERMART>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ElementTree.ParseError):
+        InformaticaMetadataParser().parse(path)
 
 
 def test_parser_extracts_workflow_tasks_and_links(tmp_path: Path) -> None:
