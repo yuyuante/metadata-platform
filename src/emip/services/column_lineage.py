@@ -21,6 +21,11 @@ from emip.domain import (
     ObjectType,
 )
 from emip.identity import physical_identity_keys
+from emip.services.sql_query_lineage import (
+    QueryDependency,
+    QueryLineageResolver,
+    QueryOutput,
+)
 
 _PHYSICAL_TYPES = {
     ObjectType.TABLE,
@@ -43,11 +48,12 @@ class _SqlInput:
 
 @dataclass(frozen=True, slots=True)
 class _DmlSource:
-    """One statement-scoped physical relation exposed to a DML expression."""
+    """One statement-scoped physical or transient DML relation."""
 
     alias: str
     qualified_name: str
     object: MetadataObject | None
+    outputs: tuple[QueryOutput, ...] | None = None
 
 
 class ColumnLineageAnalyzer:
@@ -312,13 +318,17 @@ class ColumnLineageAnalyzer:
         sql_input: _SqlInput,
         catalog: dict[tuple[str, ...], tuple[MetadataObject, ...]],
     ) -> list[ColumnLineageCandidate]:
-        relation_tables = _update_relation_tables(update)
+        relations = _update_relations(update)
+        relation_tables = [
+            relation for relation in relations if isinstance(relation, exp.Table)
+        ]
         target_table = _update_target_table(update, relation_tables)
         if target_table is None:
             return []
         target_name = _table_name(target_table)
         target_object = _unique_object(target_name, catalog)
-        sources = self._dml_sources(relation_tables, catalog)
+        resolver = QueryLineageResolver(update, catalog)
+        sources = self._dml_sources(relations, catalog, resolver)
         if not any(
             value.alias.casefold() == target_table.alias_or_name.casefold()
             for value in sources
@@ -349,6 +359,7 @@ class ColumnLineageAnalyzer:
             update.sql(),
             sql_input,
             operation="UPDATE",
+            resolver=resolver,
         )
 
     def _merge_candidates(
@@ -363,8 +374,9 @@ class ColumnLineageAnalyzer:
         target_table = merge.this
         target_name = _table_name(target_table)
         target_object = _unique_object(target_name, catalog)
-        relation_tables = [target_table, *_relation_tables(merge.args.get("using"))]
-        sources = self._dml_sources(relation_tables, catalog)
+        relations = [target_table, *_relation_sources(merge.args.get("using"))]
+        resolver = QueryLineageResolver(merge, catalog)
+        sources = self._dml_sources(relations, catalog, resolver)
         whens = merge.args.get("whens")
         if not isinstance(whens, exp.Whens):
             return []
@@ -401,6 +413,7 @@ class ColumnLineageAnalyzer:
                         operation="MERGE",
                         branch=branch_name,
                         branch_condition=branch_condition,
+                        resolver=resolver,
                     )
                 )
             elif (
@@ -420,6 +433,7 @@ class ColumnLineageAnalyzer:
                         sql_input,
                         branch_name,
                         branch_condition,
+                        resolver,
                     )
                 )
         return candidates
@@ -436,6 +450,7 @@ class ColumnLineageAnalyzer:
         sql_input: _SqlInput,
         branch: str,
         branch_condition: str | None,
+        resolver: QueryLineageResolver,
     ) -> list[ColumnLineageCandidate]:
         target_values = insert.this
         source_values = insert.expression
@@ -481,6 +496,7 @@ class ColumnLineageAnalyzer:
             operation="MERGE",
             branch=branch,
             branch_condition=branch_condition,
+            resolver=resolver,
         )
 
     def _assignment_candidates(
@@ -498,6 +514,7 @@ class ColumnLineageAnalyzer:
         operation: str,
         branch: str | None = None,
         branch_condition: str | None = None,
+        resolver: QueryLineageResolver | None = None,
     ) -> list[ColumnLineageCandidate]:
         candidates: list[ColumnLineageCandidate] = []
         for target_column, expression in assignments:
@@ -532,16 +549,10 @@ class ColumnLineageAnalyzer:
                 continue
             if target_object is None:  # Defensive narrowing after conservative proof.
                 continue
-            dependencies: list[tuple[MetadataObject, str]] = []
-            dependency_reason: str | None = None
-            for column in expression.find_all(exp.Column):
-                dependency, dependency_reason = self._resolve_dml_column(
-                    sources, column
-                )
-                if dependency is None:
-                    break
-                dependencies.append(dependency)
-            if dependency_reason is not None:
+            resolved_expression = self._resolve_dml_expression(
+                sources, expression, resolver
+            )
+            if resolved_expression.reason is not None:
                 candidates.append(
                     self._unresolved(
                         owner,
@@ -550,22 +561,28 @@ class ColumnLineageAnalyzer:
                         expression.sql(),
                         statement_sql,
                         sql_input,
-                        dependency_reason,
+                        resolved_expression.reason,
                         target_system_name=target_object.system_name,
                         operation=operation,
                         branch=branch,
                         branch_condition=branch_condition,
+                        query_path=resolved_expression.path,
                     )
                 )
                 continue
             classification = (
                 ColumnLineageClassification.EXACT_DIRECT
-                if isinstance(expression, exp.Column) and len(dependencies) == 1
+                if isinstance(expression, exp.Column)
+                and len(resolved_expression.dependencies) == 1
+                and resolved_expression.classification
+                is ColumnLineageClassification.EXACT_DIRECT
                 else ColumnLineageClassification.EXACT_EXPRESSION
             )
             dependency_values: list[tuple[MetadataObject | None, str | None]] = []
             seen_dependencies: set[tuple[object, str]] = set()
-            for dependency_object, dependency_column in dependencies:
+            for dependency in resolved_expression.dependencies:
+                dependency_object = dependency.source
+                dependency_column = dependency.column_name
                 dependency_key = (
                     dependency_object.object_id,
                     dependency_column.casefold(),
@@ -593,6 +610,7 @@ class ColumnLineageAnalyzer:
                             operation=operation,
                             branch=branch,
                             branch_condition=branch_condition,
+                            query_path=resolved_expression.path,
                         ),
                         target_system_name=target_object.system_name,
                         source_qualified_name=(
@@ -608,25 +626,71 @@ class ColumnLineageAnalyzer:
 
     @staticmethod
     def _dml_sources(
-        tables: list[exp.Table],
+        relations: list[exp.Expression],
         catalog: dict[tuple[str, ...], tuple[MetadataObject, ...]],
+        resolver: QueryLineageResolver,
     ) -> list[_DmlSource]:
         result: list[_DmlSource] = []
         seen: set[tuple[str, str]] = set()
-        for table in tables:
-            name = _table_name(table)
-            alias = table.alias_or_name
+        for relation in relations:
+            if not isinstance(relation, (exp.Table, exp.Subquery)):
+                continue
+            name = _table_name(relation) if isinstance(relation, exp.Table) else ""
+            alias = relation.alias_or_name
             key = (alias.casefold(), name.casefold())
             if key in seen:
                 continue
             seen.add(key)
-            result.append(_DmlSource(alias, name, _unique_object(name, catalog)))
+            if resolver.is_transient_source(relation):
+                result.append(
+                    _DmlSource(alias, name, None, resolver.source_outputs(relation))
+                )
+            else:
+                result.append(_DmlSource(alias, name, _unique_object(name, catalog)))
         return result
+
+    def _resolve_dml_expression(
+        self,
+        sources: list[_DmlSource],
+        expression: exp.Expression,
+        resolver: QueryLineageResolver | None,
+    ) -> QueryOutput:
+        if isinstance(expression, exp.Column):
+            return self._resolve_dml_column(sources, expression)
+        parts: list[QueryOutput] = []
+        for child in expression.iter_expressions():
+            if isinstance(child, exp.Subquery) and isinstance(child.this, exp.Query):
+                outputs = resolver.outputs(child.this) if resolver is not None else ()
+                if len(outputs) != 1:
+                    return QueryOutput(
+                        "?", reason="SCALAR_SUBQUERY_PROJECTION_MISMATCH"
+                    )
+                parts.append(outputs[0])
+            elif isinstance(child, exp.Query):
+                outputs = resolver.outputs(child) if resolver is not None else ()
+                if len(outputs) != 1:
+                    return QueryOutput(
+                        "?", reason="SCALAR_SUBQUERY_PROJECTION_MISMATCH"
+                    )
+                parts.append(outputs[0])
+            else:
+                parts.append(self._resolve_dml_expression(sources, child, resolver))
+        reason = next((part.reason for part in parts if part.reason is not None), None)
+        if reason is not None:
+            return QueryOutput("?", reason=reason)
+        return QueryOutput(
+            expression.alias_or_name or "?",
+            _deduplicate_query_dependencies(
+                dependency for part in parts for dependency in part.dependencies
+            ),
+            ColumnLineageClassification.EXACT_EXPRESSION,
+            path=tuple(entry for part in parts for entry in part.path),
+        )
 
     @staticmethod
     def _resolve_dml_column(
         sources: list[_DmlSource], column: exp.Column
-    ) -> tuple[tuple[MetadataObject, str] | None, str | None]:
+    ) -> QueryOutput:
         if column.table:
             matches = [
                 source
@@ -634,31 +698,80 @@ class ColumnLineageAnalyzer:
                 if source.alias.casefold() == column.table.casefold()
                 or source.qualified_name.casefold() == column.table.casefold()
             ]
-            if len(matches) != 1 or matches[0].object is None:
-                return None, "SOURCE_OBJECT_UNRESOLVED"
-            source = matches[0].object
+            if len(matches) != 1:
+                return QueryOutput(column.name, reason="SOURCE_OBJECT_UNRESOLVED")
+            match = matches[0]
+            if match.outputs is not None:
+                outputs = [
+                    output
+                    for output in match.outputs
+                    if output.name.casefold() == column.name.casefold()
+                ]
+                if len(outputs) != 1:
+                    return QueryOutput(
+                        column.name, reason="TRANSIENT_COLUMN_UNAVAILABLE"
+                    )
+                return outputs[0]
+            if match.object is None:
+                return QueryOutput(column.name, reason="SOURCE_OBJECT_UNRESOLVED")
+            source = match.object
             if not source.columns:
-                return None, "SOURCE_COLUMN_METADATA_UNAVAILABLE"
+                return QueryOutput(
+                    column.name, reason="SOURCE_COLUMN_METADATA_UNAVAILABLE"
+                )
             if not _has_column(source, column.name):
-                return None, "SOURCE_COLUMN_UNAVAILABLE"
-            return (source, column.name), None
+                return QueryOutput(column.name, reason="SOURCE_COLUMN_UNAVAILABLE")
+            return QueryOutput(
+                column.name,
+                (QueryDependency(source, column.name),),
+                ColumnLineageClassification.EXACT_DIRECT,
+            )
+        transient_owners: list[QueryOutput] = []
+        for dml_source in sources:
+            if dml_source.outputs is None:
+                continue
+            column_matches = [
+                output
+                for output in dml_source.outputs
+                if output.name.casefold() == column.name.casefold()
+            ]
+            if len(column_matches) > 1:
+                return QueryOutput(column.name, reason="SOURCE_COLUMN_AMBIGUOUS")
+            if column_matches:
+                if column_matches[0].reason is not None:
+                    return column_matches[0]
+                transient_owners.append(column_matches[0])
         distinct = {
-            source.object.object_id: source.object
-            for source in sources
-            if source.object is not None
+            dml_source.object.object_id: dml_source.object
+            for dml_source in sources
+            if dml_source.object is not None
         }
-        if any(source.object is None for source in sources):
-            return None, "SOURCE_OBJECT_UNRESOLVED"
+        if any(
+            dml_source.object is None and dml_source.outputs is None
+            for dml_source in sources
+        ):
+            return QueryOutput(column.name, reason="SOURCE_OBJECT_UNRESOLVED")
         if any(not source.columns for source in distinct.values()):
-            return None, "SOURCE_COLUMN_METADATA_UNAVAILABLE"
+            return QueryOutput(column.name, reason="SOURCE_COLUMN_METADATA_UNAVAILABLE")
         owners = [
             source for source in distinct.values() if _has_column(source, column.name)
         ]
-        if not owners:
-            return None, "SOURCE_COLUMN_UNAVAILABLE"
-        if len(owners) != 1:
-            return None, "SOURCE_COLUMN_AMBIGUOUS"
-        return (owners[0], column.name), None
+        resolved = [
+            *transient_owners,
+            *(
+                QueryOutput(
+                    column.name,
+                    (QueryDependency(owner, column.name),),
+                    ColumnLineageClassification.EXACT_DIRECT,
+                )
+                for owner in owners
+            ),
+        ]
+        if not resolved:
+            return QueryOutput(column.name, reason="SOURCE_COLUMN_UNAVAILABLE")
+        if len(resolved) != 1:
+            return QueryOutput(column.name, reason="SOURCE_COLUMN_AMBIGUOUS")
+        return resolved[0]
 
     def _view_candidates(
         self,
@@ -853,14 +966,34 @@ class ColumnLineageAnalyzer:
         sql_input: _SqlInput,
         catalog: dict[tuple[str, ...], tuple[MetadataObject, ...]],
     ) -> list[ColumnLineageCandidate]:
-        scope = build_scope(query)
-        if scope is None:
-            return []
+        resolver = QueryLineageResolver(cast(exp.Expression, query), catalog)
+        outputs = resolver.outputs(query)
         candidates: list[ColumnLineageCandidate] = []
         available_target_columns = {
             column.column_name.casefold() for column in target_object.columns
         }
-        for target_column, projection in zip(target_columns, projections, strict=True):
+        if isinstance(query, exp.Select) and (
+            len(outputs) != len(projections)
+            or any(
+                output.reason == "SELECT_STAR_METADATA_UNAVAILABLE"
+                for output in outputs
+            )
+        ):
+            outputs = tuple(
+                resolver.expression_output(query, projection)
+                for projection in projections
+            )
+        if len(outputs) != len(projections):
+            outputs = tuple(
+                QueryOutput(
+                    projection.alias_or_name or "?",
+                    reason="TARGET_PROJECTION_MISMATCH",
+                )
+                for projection in projections
+            )
+        for target_column, projection, output in zip(
+            target_columns, projections, outputs, strict=True
+        ):
             expression = (
                 projection.this if isinstance(projection, exp.Alias) else projection
             )
@@ -892,16 +1025,18 @@ class ColumnLineageAnalyzer:
                     )
                 )
                 continue
-            columns = list(expression.find_all(exp.Column))
-            dependencies: list[tuple[MetadataObject, str]] = []
-            unresolved = False
-            for column in columns:
-                dependency = self._resolve_column(scope, column, catalog)
-                if dependency is None:
-                    unresolved = True
-                    break
-                dependencies.append(dependency)
-            if unresolved:
+            if output.reason is not None:
+                reason = (
+                    "SOURCE_COLUMN_AMBIGUOUS_OR_UNAVAILABLE"
+                    if output.reason
+                    in {
+                        "SOURCE_COLUMN_UNAVAILABLE",
+                        "SOURCE_OBJECT_UNRESOLVED",
+                        "SOURCE_COLUMN_METADATA_UNAVAILABLE",
+                        "TRANSIENT_COLUMN_UNAVAILABLE",
+                    }
+                    else output.reason
+                )
                 candidates.append(
                     self._unresolved(
                         owner,
@@ -910,18 +1045,15 @@ class ColumnLineageAnalyzer:
                         expression.sql(),
                         statement_sql,
                         sql_input,
-                        "SOURCE_COLUMN_AMBIGUOUS_OR_UNAVAILABLE",
+                        reason,
+                        query_path=output.path,
                     )
                 )
                 continue
-            direct = isinstance(expression, exp.Column) and len(dependencies) == 1
-            classification = (
-                ColumnLineageClassification.EXACT_DIRECT
-                if direct
-                else ColumnLineageClassification.EXACT_EXPRESSION
-            )
+            classification = output.classification
             dependency_values: list[tuple[MetadataObject | None, str | None]] = list(
-                dependencies
+                (dependency.source, dependency.column_name)
+                for dependency in output.dependencies
             )
             if not dependency_values:
                 dependency_values.append((None, None))
@@ -937,7 +1069,9 @@ class ColumnLineageAnalyzer:
                         source_root=sql_input.source_root,
                         source_file=sql_input.source_file,
                         source_object=owner.qualified_name,
-                        evidence=self._evidence(sql_input, query.sql()),
+                        evidence=self._evidence(
+                            sql_input, query.sql(), query_path=output.path
+                        ),
                         target_system_name=target_system_name,
                         source_qualified_name=(
                             source_object.qualified_name if source_object else None
@@ -1007,14 +1141,17 @@ class ColumnLineageAnalyzer:
         operation: str | None = None,
         branch: str | None = None,
         branch_condition: str | None = None,
+        query_path: tuple[str, ...] = (),
     ) -> str:
-        value: dict[str, str] = {"context": sql_input.context, "query": query}
+        value: dict[str, object] = {"context": sql_input.context, "query": query}
         if operation is not None:
             value["operation"] = operation
         if branch is not None:
             value["branch"] = branch
         if branch_condition is not None:
             value["branch_condition"] = branch_condition
+        if query_path:
+            value["query_path"] = list(query_path)
         return json.dumps(
             value,
             ensure_ascii=False,
@@ -1035,6 +1172,7 @@ class ColumnLineageAnalyzer:
         operation: str | None = None,
         branch: str | None = None,
         branch_condition: str | None = None,
+        query_path: tuple[str, ...] = (),
     ) -> ColumnLineageCandidate:
         return ColumnLineageCandidate(
             target_qualified_name=target_name,
@@ -1052,6 +1190,7 @@ class ColumnLineageAnalyzer:
                 operation=operation,
                 branch=branch,
                 branch_condition=branch_condition,
+                query_path=query_path,
             ),
             target_system_name=target_system_name,
             unresolved_reason=reason,
@@ -1319,29 +1458,48 @@ def _target_column_reason(
     return None
 
 
-def _relation_tables(value: object) -> list[exp.Table]:
-    """Return direct relation tables without descending into derived queries."""
+def _deduplicate_query_dependencies(
+    dependencies: Iterable[QueryDependency],
+) -> tuple[QueryDependency, ...]:
+    result: list[QueryDependency] = []
+    seen: set[tuple[object, str]] = set()
+    for dependency in dependencies:
+        key = (dependency.source.object_id, dependency.column_name.casefold())
+        if key not in seen:
+            seen.add(key)
+            result.append(dependency)
+    return tuple(result)
 
-    if isinstance(value, exp.Table):
-        tables = [value]
+
+def _relation_sources(value: object) -> list[exp.Expression]:
+    """Return direct physical or derived relations without descending queries."""
+
+    if isinstance(value, (exp.Table, exp.Subquery)):
+        relations: list[exp.Expression] = [value]
         for join in value.args.get("joins") or []:
             if isinstance(join, exp.Join):
-                tables.extend(_relation_tables(join.this))
-        return tables
+                relations.extend(_relation_sources(join.this))
+        return relations
     if isinstance(value, exp.From):
-        tables = _relation_tables(value.this)
+        relations = _relation_sources(value.this)
         for relation in value.expressions:
-            tables.extend(_relation_tables(relation))
-        return tables
+            relations.extend(_relation_sources(relation))
+        return relations
     if isinstance(value, exp.Join):
-        return _relation_tables(value.this)
+        return _relation_sources(value.this)
     if isinstance(value, list):
-        return [table for relation in value for table in _relation_tables(relation)]
+        return [source for relation in value for source in _relation_sources(relation)]
     return []
 
 
-def _update_relation_tables(update: exp.Update) -> list[exp.Table]:
-    return _relation_tables(update.args.get("from_"))
+def _relation_tables(value: object) -> list[exp.Table]:
+    return [
+        source for source in _relation_sources(value) if isinstance(source, exp.Table)
+    ]
+
+
+def _update_relations(update: exp.Update) -> list[exp.Expression]:
+    return _relation_sources(update.args.get("from_"))
 
 
 def _update_target_table(
