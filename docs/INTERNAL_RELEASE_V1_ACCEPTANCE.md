@@ -5,7 +5,7 @@ internal developer release, not a public or hosted service.
 
 ## Build and environment
 
-- Acceptance feature HEAD: `cc265ff31b68d0d69b2da203c5f1b0b3faa9ad11`.
+- Acceptance feature HEAD: `045c5ecfca2ef492e74599e3a4774f467cb2fc30` (production acceptance continuation).
 - Python: 3.13 (`pyproject.toml` requires 3.13.x)
 - Compatibility targets: Greenplum 6.26 / PostgreSQL 9.4, MSSQL 2022, and
   Informatica PowerCenter 10.2.
@@ -41,7 +41,7 @@ ordering, and flow ordering.
 | Back/forward and deep links | PASS | Stable `#object=<UUID>` URLs and browser navigation regression. |
 | Asset/link integrity and relocation | PASS | Exporter tests verify generated local assets and `data/` references. |
 | Hostile names/SQL/evidence | PASS | `textContent` rendering and inert JSON; security regression covers script-like metadata. |
-| Determinism | NOT RUN | The first production export filled the available workspace disk; a second production export could not be run safely. |
+| Determinism | BLOCKED | The required relative-path SHA256 manifest pass was attempted against the 868 MB bundle, but workspace filesystem traversal did not complete; `web-dist` was not deleted and no second export was started. |
 | No browser/database dependency | PASS | Static server is the only runtime service. |
 
 ## Production acceptance evidence (2026-09-01)
@@ -67,9 +67,11 @@ code 0 in 938.48 seconds:
 source locations; this is reported as observed data, not a fixture.
 
 Repository-level relation/column/column-lineage SQL counts were not exposed by
-the export command, and no second production export was run because the
-workspace reached zero free space. Consequently deterministic production
-comparison and the complete count/integrity gate remain outstanding.
+the export command. A read-only repository query attempt did not return in the
+available environment, so authoritative relation/column/lineage counts and
+integrity checks remain outstanding. The required external relative-path
+SHA256 manifest could not complete within the workspace filesystem limits; the
+existing `web-dist` was preserved and no destructive re-export was attempted.
 
 Static-server smoke acceptance passed (`GET /index.html` returned HTTP 200 and
 referenced `app.js`). The generated bundle was inspected for executable
@@ -97,7 +99,8 @@ service. This release is **EMIP Internal Developer Release v1** only.
 ## Verdict
 
 The static exporter and browser contract are acceptance-ready on the feature
-branch. Internal release acceptance is **NO-GO** until a full GP178 scan (or
-authoritative persisted-snapshot evidence), repository consistency counts, and
-a second deterministic production export can be completed with sufficient disk
-space. No production data was modified.
+branch. Internal release acceptance remains **NO-GO** until authoritative
+repository consistency counts and the two-export deterministic production
+comparison can be completed in an environment with responsive access to the
+persisted repository and sufficient workspace capacity. No production data was
+modified and `web-dist` was not deleted.
