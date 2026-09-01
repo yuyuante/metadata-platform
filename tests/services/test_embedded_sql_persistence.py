@@ -247,6 +247,43 @@ def test_dml_column_lineage_is_idempotent_and_survives_detached_query(
     )
 
 
+def test_duplicate_source_columns_survive_persistence_reload_without_name_collapse(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "duplicate-columns.sql"
+    path.write_text(
+        "CREATE TABLE dbo.a (id integer);\n"
+        "CREATE TABLE dbo.b (id integer);\n"
+        "CREATE TABLE dbo.target (left_id integer, right_id integer);\n"
+        "CREATE PROCEDURE dbo.load_target AS BEGIN\n"
+        "INSERT INTO dbo.target(left_id,right_id)\n"
+        "SELECT a.id, b.id FROM dbo.a a JOIN dbo.b b ON a.id=b.id;\n"
+        "END;\n",
+        encoding="utf-8",
+    )
+    integrated = MetadataIntegrationService().integrate(SqlDdlParser().parse(path))
+    repository = RoundTripRepository()
+    persister = MetadataObjectPersister(cast(MetadataRepository, repository))
+
+    first = persister.persist(integrated.objects)
+    count = len(repository.column_lineage)
+    second = persister.persist(integrated.objects)
+    detached = QueryEngine(cast(QueryRepository, repository)).column_lineage(
+        "dbo.target"
+    )
+
+    assert first.objects_created == 4
+    assert second.objects_created == 0
+    assert len(repository.column_lineage) == count == 2
+    incoming = detached["incoming"]
+    assert isinstance(incoming, list)
+    assert [value["source_qualified_name"] for value in incoming] == [
+        "dbo.a",
+        "dbo.b",
+    ]
+    assert [value["source_column_name"] for value in incoming] == ["id", "id"]
+
+
 def test_informatica_port_lineage_is_idempotent_and_survives_detached_query(
     tmp_path: Path,
 ) -> None:
