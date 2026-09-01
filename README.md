@@ -490,7 +490,7 @@ browser does not load the complete repository catalog before its first useful
 interaction. Explicit **Explore from selection** actions create
 `#object=<stable-object-id>` history entries that work with browser Back/Forward.
 
-See [Static Developer Web](docs/emip/developer-web.md) for the output contract and deployment notes.
+See [Static Developer Web](docs/emip/developer-web.md) for the output contract and deployment notes. The internal v1 acceptance checklist is in [docs/INTERNAL_RELEASE_V1_ACCEPTANCE.md](docs/INTERNAL_RELEASE_V1_ACCEPTANCE.md).
 
 ## Running Tests / 執行測試
 
@@ -523,7 +523,7 @@ merge approval remain mandatory.
 
 ## Current Status / 目前狀態
 
-The project currently has production SQL/Informatica scanning, canonical object identity, cross-provider integration, repository graph queries, bounded Data Flow, source traceability, deterministic source retrieval, scan profiling/performance optimization, and an in-progress Static Developer Web v1.
+The project currently has production SQL/Informatica scanning, canonical object identity, cross-provider integration, repository graph queries, bounded Data Flow, source traceability, deterministic source retrieval, scan profiling/performance optimization, and the EMIP Internal Developer Release v1 static web workflow.
 
 The platform is already useful for **object-level technical metadata and developer data-flow exploration**, but it should not yet be described as a complete universal SQL lineage engine, complete Informatica SQL analyzer, embedded-SQL analyzer, or end-to-end column-lineage engine.
 

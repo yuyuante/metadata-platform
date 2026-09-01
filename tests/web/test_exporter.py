@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 
 from emip.domain import (
+    Column,
     ColumnLineage,
     ColumnLineageClassification,
     MetadataObject,
@@ -379,3 +380,39 @@ def test_browser_uses_lazy_search_shards_and_restorable_history(tmp_path: Path) 
         pytest.skip("Node.js is required for the browser history regression")
     harness = Path(__file__).with_name("navigation_regression.cjs")
     subprocess.run([node, str(harness), str(output / "app.js")], check=True, timeout=10)
+
+
+def test_export_keeps_hostile_metadata_inert_and_assets_self_contained(
+    tmp_path: Path,
+) -> None:
+    object_id = "00000000-0000-4000-8000-000000000041"
+    hostile = '<script>alert(1)</script>" ` javascript:alert(1)'
+    item = _object(object_id, ObjectType.TABLE, hostile, provider=hostile)
+    item.columns = (
+        # Column objects are mutable domain records; use the existing model
+        # without ever interpreting the hostile name as markup or a path.
+        Column(
+            object_id=item.object_id,
+            column_name=hostile,
+            ordinal_position=1,
+        ),
+    )
+    output = tmp_path / "nested" / "web-dist"
+
+    StaticWebExporter(CountingRepository([item], [])).export(output)
+
+    detail = _read_json(output / "data" / "objects" / f"{object_id}.json")
+    assert detail["object"]["qualified_name"] == hostile  # type: ignore[index]
+    assert detail["columns"][0]["name"] == hostile  # type: ignore[index]
+    javascript = (output / "app.js").read_text(encoding="utf-8")
+    assert ".textContent" in javascript
+    assert "innerHTML" not in javascript
+    assert "javascript:" not in javascript.lower()
+    generated = {
+        path.relative_to(output).as_posix()
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+    assert generated
+    assert all(not path.startswith("../") for path in generated)
+    assert not (tmp_path / "data").exists()
