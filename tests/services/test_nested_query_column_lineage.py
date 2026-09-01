@@ -424,3 +424,78 @@ def test_scope_tree_is_built_once_for_many_cte_outputs(monkeypatch) -> None:
     )
 
     assert calls == 1
+
+
+def test_duplicate_qualified_columns_remain_positional_and_distinct() -> None:
+    first = _table("dbo.a", "id")
+    second = _table("dbo.b", "id")
+    target = _table("dbo.target", "left_id", "right_id")
+    values = _analyze(
+        "INSERT INTO dbo.target(left_id,right_id) "
+        "SELECT a.id, b.id FROM dbo.a a JOIN dbo.b b ON a.id=b.id",
+        first,
+        second,
+        target,
+    )
+    assert [
+        (
+            value.target_column_name,
+            value.source_qualified_name,
+            value.source_column_name,
+        )
+        for value in values
+    ] == [
+        ("left_id", "dbo.a", "id"),
+        ("right_id", "dbo.b", "id"),
+    ]
+
+
+def test_duplicate_ids_survive_cte_star_and_unqualified_outer_is_ambiguous() -> None:
+    first = _table("dbo.a", "id")
+    second = _table("dbo.b", "id")
+    target = _table("dbo.target", "left_id", "right_id")
+    exact = _analyze(
+        "WITH cte AS (SELECT a.id, b.id FROM dbo.a a JOIN dbo.b b ON a.id=b.id) "
+        "INSERT INTO dbo.target(left_id,right_id) SELECT * FROM cte",
+        first,
+        second,
+        target,
+    )
+    assert [value.source_qualified_name for value in exact] == ["dbo.a", "dbo.b"]
+
+    ambiguous_target = _table("dbo.ambiguous_target", "id")
+    ambiguous = _analyze(
+        "WITH cte AS (SELECT a.id, b.id FROM dbo.a a JOIN dbo.b b ON a.id=b.id) "
+        "INSERT INTO dbo.ambiguous_target(id) SELECT id FROM cte",
+        first,
+        second,
+        ambiguous_target,
+    )
+    assert ambiguous[0].classification is ColumnLineageClassification.UNRESOLVED
+    assert ambiguous[0].unresolved_reason == "SOURCE_COLUMN_AMBIGUOUS_OR_UNAVAILABLE"
+
+
+def test_duplicate_ids_aliases_and_derived_scope_ambiguity() -> None:
+    first = _table("dbo.a", "id")
+    second = _table("dbo.b", "id")
+    target = _table("dbo.target", "a_id", "b_id")
+    aliased = _analyze(
+        "WITH cte AS (SELECT a.id AS a_id, b.id AS b_id "
+        "FROM dbo.a a JOIN dbo.b b ON a.id=b.id) "
+        "INSERT INTO dbo.target(a_id,b_id) SELECT a_id,b_id FROM cte",
+        first,
+        second,
+        target,
+    )
+    assert [value.source_qualified_name for value in aliased] == ["dbo.a", "dbo.b"]
+
+    derived_target = _table("dbo.derived_target", "id")
+    derived = _analyze(
+        "INSERT INTO dbo.derived_target(id) SELECT q.id FROM "
+        "(SELECT a.id, b.id FROM dbo.a a JOIN dbo.b b ON a.id=b.id) q",
+        first,
+        second,
+        derived_target,
+    )
+    assert derived[0].classification is ColumnLineageClassification.UNRESOLVED
+    assert derived[0].unresolved_reason == "SOURCE_COLUMN_AMBIGUOUS_OR_UNAVAILABLE"

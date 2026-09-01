@@ -535,7 +535,10 @@ The platform is already useful for **object-level technical metadata and develop
   mapping-definition parameters remain unresolved.
 - Java, Python, C#, C/C++, Shell, Perl, and other embedded-SQL source-language parsers are not implemented.
 - Dynamic SQL is limited to deterministic static folding; runtime-dependent cases remain unresolved.
-- Column-level lineage supports a conservative SQL foundation; complete transformation-
+- Column-level lineage supports a conservative SQL foundation, including ordered
+  `SELECT *` expansion for loaded physical schemas, qualified/multiple stars,
+  CTEs and derived tables. Expansion is positional and duplicate names are
+  preserved; missing or ambiguous schema remains unresolved. Complete transformation-
   port, runtime-generated SQL, and application-language coverage is not implemented.
 - Incremental scanning and metadata version persistence are not implemented.
 - REST API, MCP Server, AI/LLM analysis, PII detection, and server-backed UI are not implemented.
