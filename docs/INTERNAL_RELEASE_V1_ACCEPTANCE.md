@@ -5,8 +5,7 @@ internal developer release, not a public or hosted service.
 
 ## Build and environment
 
-- Commit: `a14e4fe3715e4d1dbfc3f1ead67ef95f94e3b0a4` (M018 baseline; release
-  validation is performed on the feature commit listed in the PR.)
+- Acceptance feature HEAD: `cc265ff31b68d0d69b2da203c5f1b0b3faa9ad11`.
 - Python: 3.13 (`pyproject.toml` requires 3.13.x)
 - Compatibility targets: Greenplum 6.26 / PostgreSQL 9.4, MSSQL 2022, and
   Informatica PowerCenter 10.2.
@@ -19,6 +18,7 @@ Metadata is scanned and persisted using the existing repository workflow. The
 static export then reads persisted objects, relations, and column lineage once:
 
 ```powershell
+$env:PYTHONPATH='src'; python -m emip scan 'D:\workplace\surveillance\sp_SVELGP\1_table\CR_ADMIN'
 python -m emip web export --output web-dist --depth 6
 python -m http.server 8000 --directory web-dist
 ```
@@ -41,19 +41,42 @@ ordering, and flow ordering.
 | Back/forward and deep links | PASS | Stable `#object=<UUID>` URLs and browser navigation regression. |
 | Asset/link integrity and relocation | PASS | Exporter tests verify generated local assets and `data/` references. |
 | Hostile names/SQL/evidence | PASS | `textContent` rendering and inert JSON; security regression covers script-like metadata. |
-| Determinism | PASS | Repeated export test compares manifest, details, flows, and search shards. |
+| Determinism | NOT RUN | The first production export filled the available workspace disk; a second production export could not be run safely. |
 | No browser/database dependency | PASS | Static server is the only runtime service. |
 
-## Bounded production validation
+## Production acceptance evidence (2026-09-01)
 
-The production roots were present during validation. A bounded sample of SQL
-files under `D:\workplace\surveillance\sp_SVELGP` included table definitions
-such as `CR_ADMIN.tab_EQA.sql` and `CR_ADMIN.tab_EQAFH.sql`; no production data
-was modified. Full production scan/export measurements and object-specific
-acceptance (including `dbo.STKOUT`) must be recorded when the GP178 metadata
-scan credentials are available. Until then, fixture-based web tests are the
-authoritative deterministic acceptance evidence and no production object is
-claimed here as observed.
+Both approved roots were present and were read only. The bounded GP178 SQL
+sample command above completed with exit code 0: 406 files scanned, 406
+supported, 0 failed, 0 created and 406 skipped (already persisted). The
+repository-failure report contained no failures. This was intentionally a
+bounded check, not a destructive full rescan.
+
+The export consumed the persisted production repository and completed with exit
+code 0 in 938.48 seconds:
+
+* 99,457 objects and 99,457 detail/flow records
+* 1,284 search shards
+* 868,782,685 bytes in `web-dist`
+* 537,876,111 bytes of object details, 149,433,413 bytes of flows, and
+  181,346,633 bytes of search shards
+
+`dbo.STKOUT` was found in the persisted production data as Informatica
+`SOURCE_DEFINITION` `SVEL_MS::wf_MB_AI7100B::s_m_AI7100B::STKOUT`, with a
+`BELONGS_TO` session relation. Its exported page has no columns, lineage, or
+source locations; this is reported as observed data, not a fixture.
+
+Repository-level relation/column/column-lineage SQL counts were not exposed by
+the export command, and no second production export was run because the
+workspace reached zero free space. Consequently deterministic production
+comparison and the complete count/integrity gate remain outstanding.
+
+Static-server smoke acceptance passed (`GET /index.html` returned HTTP 200 and
+referenced `app.js`). The generated bundle was inspected for executable
+metadata; browser rendering remains text-only and no literal secret value was
+identified. Production XML evidence does contain parameter *names* such as
+`$$pwd_gp`; these are not credentials, but the bundle should be reviewed before
+any broader distribution.
 
 ## Release package
 
@@ -74,5 +97,7 @@ service. This release is **EMIP Internal Developer Release v1** only.
 ## Verdict
 
 The static exporter and browser contract are acceptance-ready on the feature
-branch, subject to the final CI run and production scan evidence being attached
-to the PR. No secrets or credentials are included in this artifact.
+branch. Internal release acceptance is **NO-GO** until a full GP178 scan (or
+authoritative persisted-snapshot evidence), repository consistency counts, and
+a second deterministic production export can be completed with sufficient disk
+space. No production data was modified.
