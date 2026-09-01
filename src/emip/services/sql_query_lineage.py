@@ -69,6 +69,8 @@ class QueryOutput:
     classification: ColumnLineageClassification = ColumnLineageClassification.UNRESOLVED
     reason: str | None = None
     path: tuple[str, ...] = ()
+    origin_expression: str | None = None
+    projection_index: int | None = None
 
 
 class QueryLineageResolver:
@@ -190,15 +192,21 @@ class QueryLineageResolver:
                 result = self._set_outputs(scope, depth)
             elif isinstance(query, exp.Select):
                 expanded: list[QueryOutput] = []
-                for projection in query.expressions:
+                for projection_index, projection in enumerate(query.expressions):
                     if isinstance(projection, exp.Star) or (
                         isinstance(projection, exp.Column)
                         and isinstance(projection.this, exp.Star)
                     ):
-                        expanded.extend(self._star_outputs(scope, projection, depth))
+                        expanded.extend(
+                            self._star_outputs(
+                                scope, projection, depth, projection_index
+                            )
+                        )
                     else:
                         expanded.append(
-                            self._named_expression_output(scope, projection, depth)
+                            self._named_expression_output(
+                                scope, projection, depth, projection_index
+                            )
                         )
                 result = tuple(expanded)
             else:
@@ -210,7 +218,11 @@ class QueryLineageResolver:
             self._active.remove(key)
 
     def _star_outputs(
-        self, scope: Scope, projection: exp.Expression, depth: int
+        self,
+        scope: Scope,
+        projection: exp.Expression,
+        depth: int,
+        projection_index: int,
     ) -> tuple[QueryOutput, ...]:
         """Expand a star from the already-loaded, ordered source metadata.
 
@@ -242,6 +254,8 @@ class QueryLineageResolver:
                         value.classification,
                         value.reason,
                         ("QUALIFIED_STAR" if qualifier else "STAR", kind, *value.path),
+                        origin_expression=f"{alias}.*",
+                        projection_index=projection_index,
                     )
                     for value in values
                 )
@@ -265,6 +279,8 @@ class QueryLineageResolver:
                             "QUALIFIED_STAR" if qualifier else "STAR",
                             f"STAR_POSITION[{index}]",
                         ),
+                        origin_expression=f"{alias}.*",
+                        projection_index=projection_index,
                     )
                 )
         return tuple(outputs)
@@ -300,12 +316,18 @@ class QueryLineageResolver:
                     dependencies,
                     ColumnLineageClassification.EXACT_EXPRESSION,
                     path=path,
+                    origin_expression=f"{operation}[{index + 1}]",
+                    projection_index=index,
                 )
             )
         return tuple(results)
 
     def _named_expression_output(
-        self, scope: Scope, projection: exp.Expression, depth: int
+        self,
+        scope: Scope,
+        projection: exp.Expression,
+        depth: int,
+        projection_index: int,
     ) -> QueryOutput:
         name = projection.alias_or_name or "?"
         value = self._expression_output(scope, _unalias(projection), depth)
@@ -315,6 +337,8 @@ class QueryLineageResolver:
             value.classification,
             value.reason,
             value.path,
+            origin_expression=projection.sql(),
+            projection_index=projection_index,
         )
 
     def _expression_output(
@@ -501,6 +525,8 @@ def _apply_output_aliases(
             output.classification,
             output.reason,
             output.path,
+            output.origin_expression,
+            output.projection_index,
         )
         for alias, output in zip(aliases, outputs, strict=True)
     )

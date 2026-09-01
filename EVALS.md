@@ -40,6 +40,7 @@ suite.
 | SQL-CTE-04 | CASE selectors and WHEN predicates control branch selection | Only THEN/ELSE value expressions contribute physical lineage across query and DML consumers | `tests/services/test_nested_query_column_lineage.py::test_case_value_dependencies_exclude_searched_predicates`; `tests/services/test_dml_column_lineage.py::test_update_case_excludes_predicate_columns` |
 | STAR-01 | Loaded ordered schema makes `*` deterministic | Single/qualified/multiple stars expand positionally; unknown or invalid schema remains unresolved | `tests/services/test_select_star_expansion.py::test_single_qualified_and_multiple_stars_preserve_projection_order`; `tests/services/test_select_star_expansion.py::test_star_with_unknown_schema_is_unresolved` |
 | STAR-02 | Stars propagate through transient query sources | CTE/derived stars retain physical dependencies and output order | `tests/services/test_select_star_expansion.py::test_cte_and_derived_stars_reach_physical_columns` |
+| STAR-03 | Mixed explicit and star projections expand to multiple outputs | Each output retains its originating projection and star position; later expressions never inherit star provenance | `tests/services/test_select_star_expansion.py::test_mixed_star_and_explicit_projection_is_positional` |
 
 The machine-readable selector list is `evals/test-selectors.txt`; comments explain the
 mapping. `scripts/run_evals.py` validates and runs it in one pytest process.

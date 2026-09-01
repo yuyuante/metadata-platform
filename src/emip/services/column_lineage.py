@@ -952,22 +952,35 @@ class ColumnLineageAnalyzer:
             outputs = tuple(
                 QueryOutput(column, reason=reason) for column in target_columns
             )
-        for index, (target_column, output) in enumerate(
+        for _index, (target_column, output) in enumerate(
             zip(target_columns, outputs, strict=True)
         ):
-            projection = projections[index] if index < len(projections) else None
-            expression = (
-                (projection.this if isinstance(projection, exp.Alias) else projection)
-                if projection is not None
-                else exp.column(output.name)
-            )
+            # Provenance belongs to each expanded output; raw projection
+            # indexes are not aligned once a star expands to multiple columns.
+            expression_sql = output.origin_expression
+            if expression_sql is None:
+                projection = (
+                    projections[output.projection_index]
+                    if output.projection_index is not None
+                    and output.projection_index < len(projections)
+                    else None
+                )
+                expression_sql = (
+                    (
+                        projection.this
+                        if isinstance(projection, exp.Alias)
+                        else projection
+                    ).sql()
+                    if projection is not None
+                    else output.name
+                )
             if not available_target_columns:
                 candidates.append(
                     self._unresolved(
                         owner,
                         target_name,
                         target_column,
-                        expression.sql(),
+                        expression_sql,
                         statement_sql,
                         sql_input,
                         "TARGET_COLUMN_METADATA_UNAVAILABLE",
@@ -981,7 +994,7 @@ class ColumnLineageAnalyzer:
                         owner,
                         target_name,
                         target_column,
-                        expression.sql(),
+                        expression_sql,
                         statement_sql,
                         sql_input,
                         "TARGET_COLUMN_UNAVAILABLE",
@@ -1006,7 +1019,7 @@ class ColumnLineageAnalyzer:
                         owner,
                         target_name,
                         target_column,
-                        expression.sql(),
+                        expression_sql,
                         statement_sql,
                         sql_input,
                         reason,
@@ -1027,7 +1040,7 @@ class ColumnLineageAnalyzer:
                         target_qualified_name=target_name,
                         target_column_name=target_column,
                         classification=classification,
-                        expression=expression.sql(),
+                        expression=expression_sql,
                         statement_sql=statement_sql,
                         source_type=sql_input.source_type,
                         source_root=sql_input.source_root,

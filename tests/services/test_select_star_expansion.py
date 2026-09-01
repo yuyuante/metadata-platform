@@ -1,5 +1,7 @@
 """Focused M018 schema-star expansion regressions."""
 
+import json
+
 from emip.domain import Column, ColumnLineageClassification, MetadataObject, ObjectType
 from emip.services.column_lineage import ColumnLineageAnalyzer
 
@@ -44,6 +46,17 @@ def test_single_qualified_and_multiple_stars_preserve_projection_order() -> None
         "id",
         "amount",
     ]
+    assert [value.expression for value in values] == [
+        "a.*",
+        "a.*",
+        "b.*",
+        "b.*",
+    ]
+    paths = [json.loads(value.evidence)["query_path"] for value in values]
+    assert paths[0][-1] == "STAR_POSITION[1]"
+    assert paths[1][-1] == "STAR_POSITION[2]"
+    assert paths[2][-1] == "STAR_POSITION[1]"
+    assert paths[3][-1] == "STAR_POSITION[2]"
 
 
 def test_mixed_star_and_explicit_projection_is_positional() -> None:
@@ -55,6 +68,7 @@ def test_mixed_star_and_explicit_projection_is_positional() -> None:
         target,
     )
     assert [value.source_column_name for value in values] == ["id", "name", "id"]
+    assert [value.expression for value in values] == ["s.*", "s.*", "s.id"]
 
 
 def test_cte_and_derived_stars_reach_physical_columns() -> None:
