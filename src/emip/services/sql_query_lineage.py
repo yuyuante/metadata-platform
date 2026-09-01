@@ -238,6 +238,12 @@ class QueryLineageResolver:
                 for alias, source in sources
                 if alias.casefold() == qualifier.casefold()
             ]
+        elif len(sources) > 1:
+            # SQL projection order for an unqualified star over multiple
+            # relations must be proven by the query shape, not inferred from
+            # mapping/dictionary iteration order.  Fail closed until an
+            # explicit dialect-aware ordering proof is available.
+            return (_unresolved("*", "MULTI_SOURCE_STAR_ORDER_UNRESOLVED"),)
         if not sources:
             return (_unresolved("*", "SOURCE_OBJECT_UNRESOLVED"),)
         outputs: list[QueryOutput] = []

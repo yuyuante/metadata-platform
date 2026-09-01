@@ -41,6 +41,7 @@ suite.
 | STAR-01 | Loaded ordered schema makes `*` deterministic | Single/qualified/multiple stars expand positionally; unknown or invalid schema remains unresolved | `tests/services/test_select_star_expansion.py::test_single_qualified_and_multiple_stars_preserve_projection_order`; `tests/services/test_select_star_expansion.py::test_star_with_unknown_schema_is_unresolved` |
 | STAR-02 | Stars propagate through transient query sources | CTE/derived stars retain physical dependencies and output order | `tests/services/test_select_star_expansion.py::test_cte_and_derived_stars_reach_physical_columns` |
 | STAR-03 | Mixed explicit and star projections expand to multiple outputs | Each output retains its originating projection and star position; later expressions never inherit star provenance | `tests/services/test_select_star_expansion.py::test_mixed_star_and_explicit_projection_is_positional` |
+| STAR-04 | Unqualified multi-source stars fail closed | `SELECT *` over multiple visible sources is unresolved unless source order is explicitly proven; qualified stars remain supported | `tests/services/test_select_star_expansion.py::test_unqualified_multi_source_star_fails_closed` |
 
 The machine-readable selector list is `evals/test-selectors.txt`; comments explain the
 mapping. `scripts/run_evals.py` validates and runs it in one pytest process.

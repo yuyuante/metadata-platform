@@ -59,6 +59,28 @@ def test_single_qualified_and_multiple_stars_preserve_projection_order() -> None
     assert paths[3][-1] == "STAR_POSITION[2]"
 
 
+def test_unqualified_multi_source_star_fails_closed() -> None:
+    a = _table("dbo.a", "id", "name")
+    b = _table("dbo.b", "id", "amount")
+    target = _table("dbo.t", "a_id", "a_name", "b_id", "b_amount")
+    values = _analyze(
+        "INSERT INTO dbo.t(a_id,a_name,b_id,b_amount) SELECT * "
+        "FROM dbo.a a JOIN dbo.b b ON a.id=b.id",
+        a,
+        b,
+        target,
+    )
+    assert values
+    assert all(
+        value.classification is ColumnLineageClassification.UNRESOLVED
+        for value in values
+    )
+    assert all(
+        value.unresolved_reason == "MULTI_SOURCE_STAR_ORDER_UNRESOLVED"
+        for value in values
+    )
+
+
 def test_mixed_star_and_explicit_projection_is_positional() -> None:
     source = _table("dbo.source", "id", "name")
     target = _table("dbo.target", "id", "name", "copy")
