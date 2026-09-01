@@ -42,6 +42,7 @@ suite.
 | STAR-02 | Stars propagate through transient query sources | CTE/derived stars retain physical dependencies and output order | `tests/services/test_select_star_expansion.py::test_cte_and_derived_stars_reach_physical_columns` |
 | STAR-03 | Mixed explicit and star projections expand to multiple outputs | Each output retains its originating projection and star position; later expressions never inherit star provenance | `tests/services/test_select_star_expansion.py::test_mixed_star_and_explicit_projection_is_positional` |
 | STAR-04 | Unqualified multi-source stars fail closed | `SELECT *` over multiple visible sources is unresolved unless source order is explicitly proven; qualified stars remain supported | `tests/services/test_select_star_expansion.py::test_unqualified_multi_source_star_fails_closed` |
+| STAR-05 | Duplicate short names cross qualified and transient scopes | Physical identities remain positional and distinct; unqualified transient duplicate references fail closed | `tests/services/test_nested_query_column_lineage.py::test_duplicate_ids_survive_cte_star_and_unqualified_outer_is_ambiguous`; `tests/services/test_select_star_expansion.py::test_single_qualified_and_multiple_stars_preserve_projection_order` |
 
 The machine-readable selector list is `evals/test-selectors.txt`; comments explain the
 mapping. `scripts/run_evals.py` validates and runs it in one pytest process.

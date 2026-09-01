@@ -46,6 +46,12 @@ def test_single_qualified_and_multiple_stars_preserve_projection_order() -> None
         "id",
         "amount",
     ]
+    assert [value.source_qualified_name for value in values] == [
+        "dbo.a",
+        "dbo.a",
+        "dbo.b",
+        "dbo.b",
+    ]
     assert [value.expression for value in values] == [
         "a.*",
         "a.*",
