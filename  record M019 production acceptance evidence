@@ -1,0 +1,86 @@
+warning: in the working copy of 'docs/INTERNAL_RELEASE_V1_ACCEPTANCE.md', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/docs/INTERNAL_RELEASE_V1_ACCEPTANCE.md b/docs/INTERNAL_RELEASE_V1_ACCEPTANCE.md[m
+[1mindex f12050c..8db5cae 100644[m
+[1m--- a/docs/INTERNAL_RELEASE_V1_ACCEPTANCE.md[m
+[1m+++ b/docs/INTERNAL_RELEASE_V1_ACCEPTANCE.md[m
+[36m@@ -5,8 +5,7 @@[m [minternal developer release, not a public or hosted service.[m
+ [m
+ ## Build and environment[m
+ [m
+[31m-- Commit: `a14e4fe3715e4d1dbfc3f1ead67ef95f94e3b0a4` (M018 baseline; release[m
+[31m-  validation is performed on the feature commit listed in the PR.)[m
+[32m+[m[32m- Acceptance feature HEAD: `cc265ff31b68d0d69b2da203c5f1b0b3faa9ad11`.[m
+ - Python: 3.13 (`pyproject.toml` requires 3.13.x)[m
+ - Compatibility targets: Greenplum 6.26 / PostgreSQL 9.4, MSSQL 2022, and[m
+   Informatica PowerCenter 10.2.[m
+[36m@@ -19,6 +18,7 @@[m [mMetadata is scanned and persisted using the existing repository workflow. The[m
+ static export then reads persisted objects, relations, and column lineage once:[m
+ [m
+ ```powershell[m
+[32m+[m[32m$env:PYTHONPATH='src'; python -m emip scan 'D:\workplace\surveillance\sp_SVELGP\1_table\CR_ADMIN'[m
+ python -m emip web export --output web-dist --depth 6[m
+ python -m http.server 8000 --directory web-dist[m
+ ```[m
+[36m@@ -41,19 +41,42 @@[m [mordering, and flow ordering.[m
+ | Back/forward and deep links | PASS | Stable `#object=<UUID>` URLs and browser navigation regression. |[m
+ | Asset/link integrity and relocation | PASS | Exporter tests verify generated local assets and `data/` references. |[m
+ | Hostile names/SQL/evidence | PASS | `textContent` rendering and inert JSON; security regression covers script-like metadata. |[m
+[31m-| Determinism | PASS | Repeated export test compares manifest, details, flows, and search shards. |[m
+[32m+[m[32m| Determinism | NOT RUN | The first production export filled the available workspace disk; a second production export could not be run safely. |[m
+ | No browser/database dependency | PASS | Static server is the only runtime service. |[m
+ [m
+[31m-## Bounded production validation[m
+[32m+[m[32m## Production acceptance evidence (2026-09-01)[m
+ [m
+[31m-The production roots were present during validation. A bounded sample of SQL[m
+[31m-files under `D:\workplace\surveillance\sp_SVELGP` included table definitions[m
+[31m-such as `CR_ADMIN.tab_EQA.sql` and `CR_ADMIN.tab_EQAFH.sql`; no production data[m
+[31m-was modified. Full production scan/export measurements and object-specific[m
+[31m-acceptance (including `dbo.STKOUT`) must be recorded when the GP178 metadata[m
+[31m-scan credentials are available. Until then, fixture-based web tests are the[m
+[31m-authoritative deterministic acceptance evidence and no production object is[m
+[31m-claimed here as observed.[m
+[32m+[m[32mBoth approved roots were present and were read only. The bounded GP178 SQL[m
+[32m+[m[32msample command above completed with exit code 0: 406 files scanned, 406[m
+[32m+[m[32msupported, 0 failed, 0 created and 406 skipped (already persisted). The[m
+[32m+[m[32mrepository-failure report contained no failures. This was intentionally a[m
+[32m+[m[32mbounded check, not a destructive full rescan.[m
+[32m+[m
+[32m+[m[32mThe export consumed the persisted production repository and completed with exit[m
+[32m+[m[32mcode 0 in 938.48 seconds:[m
+[32m+[m
+[32m+[m[32m* 99,457 objects and 99,457 detail/flow records[m
+[32m+[m[32m* 1,284 search shards[m
+[32m+[m[32m* 868,782,685 bytes in `web-dist`[m
+[32m+[m[32m* 537,876,111 bytes of object details, 149,433,413 bytes of flows, and[m
+[32m+[m[32m  181,346,633 bytes of search shards[m
+[32m+[m
+[32m+[m[32m`dbo.STKOUT` was found in the persisted production data as Informatica[m
+[32m+[m[32m`SOURCE_DEFINITION` `SVEL_MS::wf_MB_AI7100B::s_m_AI7100B::STKOUT`, with a[m
+[32m+[m[32m`BELONGS_TO` session relation. Its exported page has no columns, lineage, or[m
+[32m+[m[32msource locations; this is reported as observed data, not a fixture.[m
+[32m+[m
+[32m+[m[32mRepository-level relation/column/column-lineage SQL counts were not exposed by[m
+[32m+[m[32mthe export command, and no second production export was run because the[m
+[32m+[m[32mworkspace reached zero free space. Consequently deterministic production[m
+[32m+[m[32mcomparison and the complete count/integrity gate remain outstanding.[m
+[32m+[m
+[32m+[m[32mStatic-server smoke acceptance passed (`GET /index.html` returned HTTP 200 and[m
+[32m+[m[32mreferenced `app.js`). The generated bundle was inspected for executable[m
+[32m+[m[32mmetadata; browser rendering remains text-only and no literal secret value was[m
+[32m+[m[32midentified. Production XML evidence does contain parameter *names* such as[m
+[32m+[m[32m`$$pwd_gp`; these are not credentials, but the bundle should be reviewed before[m
+[32m+[m[32many broader distribution.[m
+ [m
+ ## Release package[m
+ [m
+[36m@@ -74,5 +97,7 @@[m [mservice. This release is **EMIP Internal Developer Release v1** only.[m
+ ## Verdict[m
+ [m
+ The static exporter and browser contract are acceptance-ready on the feature[m
+[31m-branch, subject to the final CI run and production scan evidence being attached[m
+[31m-to the PR. No secrets or credentials are included in this artifact.[m
+[32m+[m[32mbranch. Internal release acceptance is **NO-GO** until a full GP178 scan (or[m
+[32m+[m[32mauthoritative persisted-snapshot evidence), repository consistency counts, and[m
+[32m+[m[32ma second deterministic production export can be completed with sufficient disk[m
+[32m+[m[32mspace. No production data was modified.[m

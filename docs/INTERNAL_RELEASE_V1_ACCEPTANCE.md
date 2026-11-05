@@ -5,7 +5,7 @@ internal developer release, not a public or hosted service.
 
 ## Build and environment
 
-- Acceptance feature HEAD: `045c5ecfca2ef492e74599e3a4774f467cb2fc30` (production acceptance continuation).
+- Acceptance feature HEAD: `a601e2df42969d227faff8c16246b6a0aafae239` (latest committed acceptance continuation; no newer commit could be created because Git index locking is denied by workspace ACLs).
 - Python: 3.13 (`pyproject.toml` requires 3.13.x)
 - Compatibility targets: Greenplum 6.26 / PostgreSQL 9.4, MSSQL 2022, and
   Informatica PowerCenter 10.2.
@@ -66,14 +66,21 @@ code 0 in 938.48 seconds:
 `BELONGS_TO` session relation. Its exported page has no columns, lineage, or
 source locations; this is reported as observed data, not a fixture.
 
-Repository-level relation/column/column-lineage SQL counts were not exposed by
-the export command. A read-only repository query attempt did not return in the
-available environment, so authoritative relation/column/lineage counts and
-integrity checks remain outstanding. The required external relative-path
-SHA256 manifest could not complete within the workspace filesystem limits; the
-existing `web-dist` was preserved and no destructive re-export was attempted.
+Production acceptance date: 2026-09-02. Repository-level
+MetadataObject/Relation/Column/ColumnLineage SQL counts were not exposed by
+the export command. The environment has no `PGHOST`, `PGPORT`, `PGDATABASE`, or
+`PGUSER` settings and no `config/database.yaml`; a bounded read-only repository
+query therefore could not establish a connection and did not return counts.
+Authoritative counts and SQL integrity checks remain outstanding (no SQL was
+run without a configured connection). The scan
+report provides bounded evidence: 406 files scanned/supported, 0 failed, and
+`scan-report/integration-report.txt` reports 0 duplicate identities but 406
+orphan objects. This anomaly is not hidden or repaired. The required
+relative-path SHA256 manifest could not complete within workspace filesystem
+limits; the existing `web-dist` was preserved and no second export was run.
 
-Static-server smoke acceptance passed (`GET /index.html` returned HTTP 200 and
+Static-web regression tests passed (`tests/web`: 6 passed). Static-server smoke
+acceptance passed (`GET /index.html` returned HTTP 200 and
 referenced `app.js`). The generated bundle was inspected for executable
 metadata; browser rendering remains text-only and no literal secret value was
 identified. Production XML evidence does contain parameter *names* such as

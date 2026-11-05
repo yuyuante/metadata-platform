@@ -1,0 +1,19 @@
+python -m emip scan D:\workplace\surveillance\sp_EQGP\1_table
+python -m emip scan D:\workplace\surveillance\sp_EQGP\3_sp
+python -m emip scan D:\workplace\surveillance\sp_EQGP\4_functions
+
+python -m emip scan D:\workplace\surveillance\sp_SVEL_MSAH
+python -m emip scan D:\workplace\surveillance\sp_SVEL_MSAH\function
+python -m emip scan D:\workplace\surveillance\sp_SVEL_MSAH\tab
+python -m emip scan D:\workplace\surveillance\sp_SVEL_MSAH\view
+
+python -m emip scan D:\workplace\surveillance\sp_SVEL_MSAH_FLEX
+python -m emip scan D:\workplace\surveillance\sp_SVEL_MSAH_FLEX\function
+python -m emip scan D:\workplace\surveillance\sp_SVEL_MSAH_FLEX\tab
+python -m emip scan D:\workplace\surveillance\sp_SVEL_MSAH_FLEX\view
+
+python -m emip scan D:\workplace\surveillance\sp_SVELGP\1_table
+python -m emip scan D:\workplace\surveillance\sp_SVELGP\2_view
+python -m emip scan D:\workplace\surveillance\sp_SVELGP\3_sp
+python -m emip scan D:\workplace\surveillance\sp_SVELGP\4_function
+
